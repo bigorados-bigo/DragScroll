@@ -1,0 +1,27 @@
+# AutoHotkey specific
+*.exe
+*.tmp
+*.bak
+
+# Configuration files (user-specific)
+mouse-scroll.ini
+*.ini.bak
+
+# Windows
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files
+temp/
+tmp/
