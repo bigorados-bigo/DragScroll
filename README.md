@@ -26,6 +26,7 @@ A powerful AutoHotkey script that transforms your mouse into a drag-to-scroll to
 - **Fallback Clicks**: Single clicks still work when no dragging occurs
 - **Performance Optimized**: Configurable scan intervals and batch processing
 - **Buffer Management**: Smooth scrolling with delta accumulation
+- **Explorer Override**: UI Automation mode drags the native scrollbar for Windows Explorer
 
 ## 🚀 Quick Start
 
@@ -47,6 +48,7 @@ A powerful AutoHotkey script that transforms your mouse into a drag-to-scroll to
 | Setting | Description | Default |
 |---------|-------------|---------|
 | **Activation Button** | Mouse button to trigger drag scrolling | Middle Button |
+| **Activation Button Slot 2** | Optional secondary button for drag scrolling | — |
 | **Invert Direction** | Reverse scroll direction | Disabled |
 | **Horizontal Mode** | Switch to horizontal panning | Disabled |
 | **Speed Multiplier** | Adjust scrolling speed | 1.0 |
@@ -80,9 +82,6 @@ Format: `process.exe:height_in_pixels`
 - XButton2 (side button)
 
 ### Smart Detection
-- **Process-based exclusions**: Automatically disabled for specified applications
-- **Title bar protection**: Configurable guard zones prevent accidental scrolling
-- **Fallback behavior**: Preserves normal click functionality
 
 ### Performance Tuning
 - Configurable scan intervals (5-1000ms)
