@@ -1,4 +1,219 @@
+ScrollIndicatorUpdateLayered(data)
+{
+    global scrollIndicatorGuiHwnd, scrollIndicatorCurrentIcon
+    global scrollIndicatorCursorWidth, scrollIndicatorCursorHeight
+    global scrollIndicatorHotspotX, scrollIndicatorHotspotY
+    global debugEnabled
 
+    if (!scrollIndicatorGuiHwnd)
+        return false
+    if (!IsObject(data) || !data.HasKey("hbm") || !data.hbm)
+        return false
+
+    hdc := DllCall("GetDC", "ptr", 0, "ptr")
+    if (!hdc)
+        return false
+
+    memDC := DllCall("CreateCompatibleDC", "ptr", hdc, "ptr")
+    if (!memDC)
+    {
+        DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+        return false
+    }
+
+    oldBmp := DllCall("SelectObject", "ptr", memDC, "ptr", data.hbm, "ptr")
+    if (!oldBmp)
+    {
+        DllCall("DeleteDC", "ptr", memDC)
+        DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+        return false
+    }
+
+    VarSetCapacity(size, 8, 0)
+    NumPut(data.width, size, 0, "int")
+    NumPut(data.height, size, 4, "int")
+
+    VarSetCapacity(srcPoint, 8, 0)
+
+    VarSetCapacity(blend, 4, 0)
+    NumPut(0x00, blend, 0, "uchar")
+    NumPut(0x00, blend, 1, "uchar")
+    NumPut(255, blend, 2, "uchar")
+    NumPut(0x01, blend, 3, "uchar")
+
+    success := DllCall("UpdateLayeredWindow", "ptr", scrollIndicatorGuiHwnd, "ptr", hdc, "ptr", 0, "ptr", &size, "ptr", memDC, "ptr", &srcPoint, "uint", 0, "ptr", &blend, "uint", 2)
+
+    DllCall("SelectObject", "ptr", memDC, "ptr", oldBmp)
+    DllCall("DeleteDC", "ptr", memDC)
+    DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+
+    if (!success)
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator: UpdateLayeredWindow failed (" . A_LastError . ")")
+        return false
+    }
+
+    scrollIndicatorCurrentIcon := data.icon
+    scrollIndicatorCursorWidth := data.width
+    scrollIndicatorCursorHeight := data.height
+    scrollIndicatorHotspotX := data.hotspotX
+    scrollIndicatorHotspotY := data.hotspotY
+
+    return true
+}
+
+ScrollIndicatorExtractIconBitmap(hCursor, ByRef width, ByRef height, ByRef hotspotX, ByRef hotspotY)
+{
+    global debugEnabled
+
+    static iconInfoSize := (A_PtrSize = 8) ? 32 : 20
+    maskOffset := (A_PtrSize = 8) ? 16 : 12
+    colorOffset := maskOffset + A_PtrSize
+    bmInfoSize := (A_PtrSize = 8) ? 32 : 24
+
+    VarSetCapacity(iconInfo, iconInfoSize, 0)
+    if (!DllCall("GetIconInfo", "ptr", hCursor, "ptr", &iconInfo))
+        return 0
+
+    hotspotX := NumGet(iconInfo, 4, "uint")
+    hotspotY := NumGet(iconInfo, 8, "uint")
+    hbmMask := NumGet(iconInfo, maskOffset, "ptr")
+    hbmColor := NumGet(iconInfo, colorOffset, "ptr")
+
+    if (hbmColor)
+    {
+        VarSetCapacity(bm, bmInfoSize, 0)
+        if (DllCall("GetObject", "ptr", hbmColor, "int", bmInfoSize, "ptr", &bm))
+        {
+            width := NumGet(bm, 4, "int")
+            height := Abs(NumGet(bm, 8, "int"))
+        }
+    }
+    if ((!width || !height) && hbmMask)
+    {
+        VarSetCapacity(bmMask, bmInfoSize, 0)
+        if (DllCall("GetObject", "ptr", hbmMask, "int", bmInfoSize, "ptr", &bmMask))
+        {
+            maskW := NumGet(bmMask, 4, "int")
+            maskH := Abs(NumGet(bmMask, 8, "int"))
+            if (!width && maskW > 0)
+                width := maskW
+            if (!height && maskH > 0)
+                height := maskH // 2
+        }
+    }
+
+    if (width <= 0)
+        width := 32
+    if (height <= 0)
+        height := 32
+
+    hbm := ScrollIndicatorDrawIconBitmap(hCursor, width, height)
+    if (!hbm && debugEnabled)
+        DebugLog("Scroll indicator: DrawIconEx failed; icon will be hidden")
+
+    if (hbmMask)
+        DllCall("DeleteObject", "ptr", hbmMask)
+    if (hbmColor)
+        DllCall("DeleteObject", "ptr", hbmColor)
+
+    return hbm
+}
+
+ScrollIndicatorDrawIconBitmap(hIcon, width, height)
+{
+    if (!hIcon)
+        return 0
+
+    hdc := DllCall("GetDC", "ptr", 0, "ptr")
+    if (!hdc)
+        return 0
+
+    memDC := DllCall("CreateCompatibleDC", "ptr", hdc, "ptr")
+    if (!memDC)
+    {
+        DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+        return 0
+    }
+
+    VarSetCapacity(bi, 40, 0)
+    NumPut(40, bi, 0, "uint")
+    NumPut(width, bi, 4, "int")
+    actualHeight := Abs(height)
+    NumPut(-actualHeight, bi, 8, "int")
+    NumPut(1, bi, 12, "ushort")
+    NumPut(32, bi, 14, "ushort")
+    NumPut(0, bi, 16, "uint")
+    stride := ((width * 32 + 31) // 32) * 4
+    NumPut(stride * actualHeight, bi, 20, "uint")
+
+    bits := 0
+    hbm := DllCall("CreateDIBSection", "ptr", hdc, "ptr", &bi, "uint", 0, "ptr*", bits, "ptr", 0, "uint", 0, "ptr")
+    if (!hbm)
+    {
+        DllCall("DeleteDC", "ptr", memDC)
+        DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+        return 0
+    }
+
+    oldBmp := DllCall("SelectObject", "ptr", memDC, "ptr", hbm, "ptr")
+    if (!oldBmp)
+    {
+        DllCall("DeleteObject", "ptr", hbm)
+        DllCall("DeleteDC", "ptr", memDC)
+        DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+        return 0
+    }
+
+    if (bits)
+        DllCall("msvcrt\memset", "ptr", bits, "int", 0, "uptr", stride * actualHeight)
+    drawSuccess := DllCall("User32.dll\DrawIconEx", "ptr", memDC, "int", 0, "int", 0, "ptr", hIcon, "int", width, "int", height, "uint", 0, "ptr", 0, "uint", 0x0003)
+    if (drawSuccess)
+        ScrollIndicatorPremultiplyAlpha(bits, width, actualHeight)
+
+    DllCall("SelectObject", "ptr", memDC, "ptr", oldBmp)
+    if (!drawSuccess)
+    {
+        DllCall("DeleteObject", "ptr", hbm)
+        hbm := 0
+    }
+    DllCall("DeleteDC", "ptr", memDC)
+    DllCall("ReleaseDC", "ptr", 0, "ptr", hdc)
+
+    return hbm
+}
+
+ScrollIndicatorPremultiplyAlpha(bits, width, height)
+{
+    if (!bits)
+        return
+
+    if (width <= 0 || height <= 0)
+        return
+
+    total := width * height
+    offset := 0
+    Loop, %total%
+    {
+        addr := bits + offset
+        alpha := NumGet(addr, 3, "uchar")
+        if (alpha = 0)
+        {
+            NumPut(0, addr, 0, "uint")
+        }
+        else if (alpha < 255)
+        {
+            blue := NumGet(addr, 0, "uchar")
+            green := NumGet(addr, 1, "uchar")
+            red := NumGet(addr, 2, "uchar")
+            NumPut((blue * alpha) // 255, addr, 0, "uchar")
+            NumPut((green * alpha) // 255, addr, 1, "uchar")
+            NumPut((red * alpha) // 255, addr, 2, "uchar")
+        }
+        offset += 4
+    }
+}
 /*
 Mouse Scroll v04 (extended)
 Original by Mikhail V., 2021
@@ -6,26 +221,40 @@ Enhancements: configurable GUI, high-resolution wheel control, process exclusion
 */
 
 #SingleInstance Force
-#NoEnv  ; Recommended for performance and compatibility with future AutoHotkey releases.
+    global swap, scrollMode, k, wheelSensitivity, wheelMaxStep
 SendMode Input  ; Recommended for new scripts due to its superior speed and reliability.
-
+    global debugHotkeysEnabled, debugStartEnabled, mouseLockEnabled, mouseLockHideCursor
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global scrollIndicatorEnabled
+    global scrollSmoothingEnabled, scrollSmoothingFactor
+    global SCROLL_MODE_VERTICAL, SCROLL_MODE_HORIZONTAL, SCROLL_MODE_MULTI
 SetBatchLines, -1
 SetWorkingDir, %A_ScriptDir%
 
 global configFile := A_ScriptDir . "\mouse-scroll.ini"
+
+    scrollMode := SCROLL_MODE_VERTICAL
 global running := 0
 global passThrough := false
 global swap := 0
-global horiz := 0
+global SCROLL_MODE_VERTICAL := 0
+global SCROLL_MODE_HORIZONTAL := 1
+global SCROLL_MODE_MULTI := 2
+global scrollMode := SCROLL_MODE_VERTICAL
 global k := 1.0
 global wheelSensitivity := 12.0
 global wheelMaxStep := 480
 global scanInterval := 20
+    multiVerticalBias := 1.0
+    multiHorizontalBias := 1.0
+    multiActivationThreshold := 1.0
 
 global wheelBuffer := 0.0
+global wheelBufferHoriz := 0.0
+global scrollVelocityY := 0.0
+global scrollVelocityX := 0.0
 global scrollsTotal := 0
 global activationButton := "MButton"
-global currentHotkey := ""
 global activationButton2 := ""
 global currentHotkey2 := ""
 global activationHotkeyData := {}
@@ -46,10 +275,21 @@ global activationMovementDetected := false
 global activationState := "idle"
 global activationNativeDown := false
 global activationTriggerData := ""
+global activationTriggerIdentity := ""
+global activationTriggerIsHold := false
 global activationLastMotionTick := 0
 global activationIdleRestoreMs := 220
 global activationDragThreshold := 1
+global activationPendingStartTick := 0
+global activationHoldDecisionDelay := 35
+global activationHoldGraceDeadline := 0
+global activationHoldActive := false
+global activationHoldRepeatTimerActive := false
+global activationHoldRepeatDelay := 275
+global activationHoldRepeatInterval := 35
+global activationHotkeySuspended := false
 global explorerContext := {}
+global explorerScaleCache := {}
 global lastExplorerWindow := 0
 global uiAutomation := ""
 global debugEnabled := false
@@ -59,6 +299,24 @@ global debugHotkeysEnabled := 0
 global debugStartEnabled := 0
 global debugLogRedirected := false
 global debugLogWarned := false
+
+global multiVerticalBias := 1.0
+global multiHorizontalBias := 1.0
+global multiActivationThreshold := 1.0
+
+global scrollIndicatorEnabled := 0
+global scrollIndicatorGuiCreated := false
+global scrollIndicatorGuiVisible := false
+global scrollIndicatorGuiHwnd := 0
+global scrollIndicatorCursorWidth := 32
+global scrollIndicatorCursorHeight := 32
+global scrollIndicatorHotspotX := 16
+global scrollIndicatorHotspotY := 16
+global scrollIndicatorLastX := ""
+global scrollIndicatorLastY := ""
+global scrollIndicatorIconCache := {}
+global scrollIndicatorCurrentMode := ""
+global scrollIndicatorCurrentIcon := 0
 
 ;--- Mouse lock configuration ---
 global mouseLockEnabled := true
@@ -70,6 +328,8 @@ global mouseLockCursorHidden := false
 global mouseLockBlankCursor := 0
 global mouseLockSystemCursorApplied := false
 global mouseLockOriginalCursors := {}
+global scrollSmoothingEnabled := 1
+global scrollSmoothingFactor := 0.65
 
 autoExec()
 return
@@ -99,10 +359,14 @@ autoExec()
 ;  Main scrolling loop
 ;------------------------
 ScrollTick:
-    global running, horiz, k, mxLast, myLast
-    global wheelBuffer, wheelSensitivity, wheelMaxStep
+    global running, scrollMode, k, mxLast, myLast
+    global wheelBuffer, wheelBufferHoriz, wheelSensitivity, wheelMaxStep
+    global scrollVelocityY, scrollVelocityX
+    global scrollSmoothingEnabled, scrollSmoothingFactor
     global swap, scrollsTotal, debugEnabled
     global mouseLockEnabled, mouseLockActive, mouseLockAnchorX, mouseLockAnchorY
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global scrollIndicatorEnabled, scrollIndicatorGuiVisible
 
     if (!running)
         return
@@ -115,31 +379,71 @@ ScrollTick:
     }
     lockApplied := (mouseLockEnabled && mouseLockActive)
 
+    deltaX := 0.0
+    deltaY := 0.0
+
     if (lockApplied)
     {
         deltaX := mx - mouseLockAnchorX
         deltaY := my - mouseLockAnchorY
-        rawDelta := ClampRawDelta(horiz ? deltaX : deltaY)
-        dy := k * rawDelta
         if (deltaX != 0 || deltaY != 0)
             DllCall("SetCursorPos", "int", mouseLockAnchorX, "int", mouseLockAnchorY)
+        mx := mouseLockAnchorX
+        my := mouseLockAnchorY
         mxLast := mouseLockAnchorX
         myLast := mouseLockAnchorY
     }
-    else if (horiz)
+    else
     {
-        rawDelta := ClampRawDelta(mx - mxLast)
-        dy := k * rawDelta
-        mxLast := mx
+        deltaX := mx - mxLast
+        deltaY := my - myLast
+    }
+
+    verticalInput := 0.0
+    horizontalInput := 0.0
+    rawActivationDelta := 0.0
+
+    if (scrollMode = SCROLL_MODE_VERTICAL)
+    {
+        rawDelta := ClampRawDelta(deltaY)
+        rawActivationDelta := rawDelta
+        verticalInput := k * rawDelta
+        if (!lockApplied)
+            myLast := my
+    }
+    else if (scrollMode = SCROLL_MODE_HORIZONTAL)
+    {
+        rawDelta := ClampRawDelta(deltaX)
+        rawActivationDelta := rawDelta
+        horizontalInput := k * rawDelta
+        if (!lockApplied)
+            mxLast := mx
     }
     else
     {
-        rawDelta := ClampRawDelta(my - myLast)
-        dy := k * rawDelta
-        myLast := my
+        rawVertical := ClampRawDelta(deltaY)
+        rawHorizontal := ClampRawDelta(deltaX)
+        if (Abs(rawVertical) >= Abs(rawHorizontal))
+            rawActivationDelta := rawVertical
+        else
+            rawActivationDelta := rawHorizontal
+
+        adjVertical := rawVertical * multiVerticalBias
+        adjHorizontal := -rawHorizontal * multiHorizontalBias
+
+        if (Abs(adjVertical) >= multiActivationThreshold)
+            verticalInput := k * adjVertical
+        if (Abs(adjHorizontal) >= multiActivationThreshold)
+            horizontalInput := k * adjHorizontal
+
+        if (!lockApplied)
+        {
+            mxLast := mx
+            myLast := my
+        }
     }
 
-    if (!ProcessActivationDragState(rawDelta, mx, my))
+    if (!ProcessActivationDragState(rawActivationDelta, mx, my))
         return
 
     if (mouseLockEnabled && mouseLockActive)
@@ -148,145 +452,187 @@ ScrollTick:
         my := mouseLockAnchorY
     }
 
-    if (HandleExplorerScroll(dy, mx, my))
-        return
-
-    if (ShouldSuppressForTopGuard(mx, my))
+    smoothingEnabled := (scrollSmoothingEnabled ? true : false)
+    if (smoothingEnabled)
     {
-        wheelBuffer := 0
-        return
+        smoothingFactor := scrollSmoothingFactor
+        if (smoothingFactor < 0)
+            smoothingFactor := 0
+        else if (smoothingFactor >= 0.999)
+            smoothingFactor := 0.999
+        velocityBlend := 1.0 - smoothingFactor
+        scrollVelocityY := scrollVelocityY * smoothingFactor + verticalInput * velocityBlend
+        scrollVelocityX := scrollVelocityX * smoothingFactor + horizontalInput * velocityBlend
+        if (Abs(scrollVelocityY) < 0.0001)
+            scrollVelocityY := 0.0
+        if (Abs(scrollVelocityX) < 0.0001)
+            scrollVelocityX := 0.0
+        verticalEffective := scrollVelocityY
+        horizontalEffective := scrollVelocityX
+    }
+    else
+    {
+        scrollVelocityY := 0.0
+        scrollVelocityX := 0.0
+        verticalEffective := verticalInput
+        horizontalEffective := horizontalInput
     }
 
-    wheelBuffer += dy * wheelSensitivity
-    delta := Round(wheelBuffer)
-    if (delta = 0)
-        return
-
-    wheelBuffer -= delta
-    if (Abs(delta) > wheelMaxStep)
+    if (verticalEffective != 0)
     {
-        clamped := (delta > 0 ? wheelMaxStep : -wheelMaxStep)
-        wheelBuffer += (delta - clamped)
-        delta := clamped
+        if (HandleExplorerScroll(verticalEffective, mx, my))
+            verticalEffective := 0
     }
 
-    eventFlag := horiz ? 0x01000 : 0x0800
-    sendVal := swap ? delta : -delta
-    DllCall("mouse_event", "UInt", eventFlag, "UInt", 0, "UInt", 0, "Int", sendVal, "Ptr", 0)
-    scrollsTotal += Abs(delta)
-return
-
-;------------------------
-;  Hotkey handlers
-;------------------------
-ActivationButtonDown:
-    global passThrough, running, wheelBuffer, scrollsTotal
-    global mxLast, myLast, horiz, debugEnabled
-    global activationHotkeyData, activationMovementDetected
-    global activationState, activationNativeDown, activationTriggerData
-    global activationLastMotionTick
-
-    triggerId := GetHotkeyIdentity(A_ThisHotkey)
-    triggerData := activationHotkeyData.HasKey(triggerId) ? activationHotkeyData[triggerId] : BuildActivationHotkeyData(triggerId)
-
-    if (debugEnabled)
-        DebugLog("ActivationButtonDown trigger=" . (triggerId != "" ? triggerId : "(unknown)"))
-    EndMouseLock()
-
-    if (!IsObject(triggerData))
+    if (verticalEffective != 0 && ShouldSuppressForTopGuard(mx, my))
     {
-        passThrough := true
-        running := 0
-        activationState := "idle"
-        activationTriggerData := ""
-        activationNativeDown := false
-        activationMovementDetected := false
-        if (debugEnabled)
-            DebugLog("Activation hotkey data unavailable; forcing passthrough")
+        ResetWheelBuffers()
         return
     }
 
-    if (ShouldBlockProcess())
+    if (verticalEffective != 0 || (smoothingEnabled && scrollVelocityY != 0))
     {
-        passThrough := true
-        activationNativeDown := SendActivationDown(triggerData)
-        running := 0
-        activationState := "idle"
-        activationTriggerData := ""
-        activationMovementDetected := false
-        if (debugEnabled)
-            DebugLog("Activation blocked for current process; passing through")
-        return
+        wheelBuffer += verticalEffective * wheelSensitivity
+        delta := Round(wheelBuffer)
+        if (delta != 0)
+        {
+            wheelBuffer -= delta
+            if (Abs(delta) > wheelMaxStep)
+            {
+                clamped := (delta > 0 ? wheelMaxStep : -wheelMaxStep)
+                wheelBuffer += (delta - clamped)
+                delta := clamped
+            }
+            sendVal := swap ? delta : -delta
+            DllCall("mouse_event", "UInt", 0x0800, "UInt", 0, "UInt", 0, "Int", sendVal, "Ptr", 0)
+            scrollsTotal += Abs(delta)
+        }
     }
 
-    passThrough := false
-    running := 1
-    wheelBuffer := 0
-    scrollsTotal := 0
-    activationMovementDetected := false
-    activationTriggerData := triggerData
-    activationState := "pending"
-    activationLastMotionTick := A_TickCount
-    activationNativeDown := false
-    if (!GetCursorPoint(mxLast, myLast))
+    if (horizontalEffective != 0 || (smoothingEnabled && scrollVelocityX != 0))
     {
-        mxLast := 0
-        myLast := 0
-    }
-    TryActivateExplorerMode()
-return
-
-ActivationButtonUp:
-    global passThrough, running, scrollsTotal, debugEnabled
-    global activationHotkeyData, activationMovementDetected
-    global activationState, activationNativeDown, activationTriggerData
-
-    triggerId := GetHotkeyIdentity(A_ThisHotkey)
-    triggerData := IsObject(activationTriggerData) ? activationTriggerData : (activationHotkeyData.HasKey(triggerId) ? activationHotkeyData[triggerId] : BuildActivationHotkeyData(triggerId))
-
-    if (debugEnabled)
-        DebugLog("ActivationButtonUp trigger=" . (triggerId != "" ? triggerId : "(unknown)") . " scrollsTotal=" . scrollsTotal)
-
-    ResetExplorerMode()
-    EndMouseLock()
-
-    if (passThrough)
-    {
-        if (activationNativeDown)
-            SendActivationUp(triggerData)
-        passThrough := false
-        activationMovementDetected := false
-        activationState := "idle"
-        activationNativeDown := false
-        activationTriggerData := ""
-        return
+        wheelBufferHoriz += horizontalEffective * wheelSensitivity
+        deltaH := Round(wheelBufferHoriz)
+        if (deltaH != 0)
+        {
+            wheelBufferHoriz -= deltaH
+            if (Abs(deltaH) > wheelMaxStep)
+            {
+                clampedH := (deltaH > 0 ? wheelMaxStep : -wheelMaxStep)
+                wheelBufferHoriz += (deltaH - clampedH)
+                deltaH := clampedH
+            }
+            sendValH := swap ? deltaH : -deltaH
+            DllCall("mouse_event", "UInt", 0x01000, "UInt", 0, "UInt", 0, "Int", sendValH, "Ptr", 0)
+            scrollsTotal += Abs(deltaH)
+        }
     }
 
-    running := 0
-    if (activationNativeDown)
-        SendActivationUp(triggerData)
-    else if (!activationMovementDetected && IsObject(triggerData))
-        SendActivationTap(triggerData)
-    activationState := "idle"
-    activationNativeDown := false
-    activationTriggerData := ""
-    activationMovementDetected := false
-    scrollsTotal := 0
+    if (scrollIndicatorEnabled && scrollIndicatorGuiVisible)
+        UpdateScrollIndicatorPosition(mx, my)
 return
 
 ;------------------------
 ;  Settings management
 ;------------------------
+IniSerializeMultiline(value)
+{
+    if (value = "")
+        return ""
+    value := StrReplace(value, "`r`n", "`n")
+    value := StrReplace(value, "`r", "`n")
+    value := StrReplace(value, "%", "%25")
+    return StrReplace(value, "`n", "%0A")
+}
+
+IniDeserializeMultiline(value)
+{
+    if (value = "")
+        return ""
+    value := StrReplace(value, "%0A", "`n")
+    value := StrReplace(value, "%25", "%")
+    return StrReplace(value, "`n", "`r`n")
+}
+
+IniReadMultiline(filePath, section, key, defaultValue := "")
+{
+    if (!FileExist(filePath))
+        return defaultValue
+
+    FileRead, rawContent, %filePath%
+    if (ErrorLevel)
+        return defaultValue
+
+    StringLower, sectionLower, section
+    foundSection := false
+    foundKey := false
+    value := ""
+    Loop, Parse, rawContent, `n, `r
+    {
+        line := A_LoopField
+        if (line = "")
+        {
+            if (foundKey)
+                break
+            else
+                continue
+        }
+
+        firstChar := SubStr(line, 1, 1)
+        if (firstChar = ";")
+            continue
+
+        if (firstChar = "[")
+        {
+            closeIdx := InStr(line, "]")
+            if (closeIdx <= 1)
+                continue
+            sectionName := SubStr(line, 2, closeIdx - 2)
+            StringLower, sectionNameLower, sectionName
+            if (foundKey)
+                break
+            foundSection := (sectionNameLower = sectionLower)
+            continue
+        }
+
+        if (!foundSection)
+            continue
+
+        trimmed := LTrim(line)
+        keyPrefix := key . "="
+        if (!foundKey)
+        {
+            if (SubStr(trimmed, 1, StrLen(keyPrefix)) = keyPrefix)
+            {
+                value := SubStr(trimmed, StrLen(keyPrefix) + 1)
+                foundKey := true
+            }
+            continue
+        }
+
+        if (InStr(trimmed, "=") || SubStr(trimmed, 1, 1) = "[")
+            break
+
+        value .= "`n" . trimmed
+    }
+
+    if (!foundKey)
+        return defaultValue
+    return value
+}
+
 LoadSettings()
 {
     global configFile
-    global swap, horiz, k, wheelSensitivity, wheelMaxStep
+    global swap, scrollMode, k, wheelSensitivity, wheelMaxStep
     global activationButton, activationButton2, processListText, scanInterval, topGuardListText
     global debugHotkeysEnabled, debugStartEnabled, mouseLockEnabled, mouseLockHideCursor
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global scrollSmoothingEnabled, scrollSmoothingFactor, scrollIndicatorEnabled
+    global SCROLL_MODE_VERTICAL, SCROLL_MODE_HORIZONTAL, SCROLL_MODE_MULTI
 
-    ; defaults
     swap := 0
-    horiz := 0
+    scrollMode := SCROLL_MODE_VERTICAL
     k := 1.0
     wheelSensitivity := 12.0
     wheelMaxStep := 480
@@ -298,19 +644,25 @@ LoadSettings()
     debugStartEnabled := 1
     mouseLockEnabled := 1
     mouseLockHideCursor := 1
+    multiVerticalBias := 1.0
+    multiHorizontalBias := 1.0
+    multiActivationThreshold := 1.0
+    scrollSmoothingEnabled := 1
+    scrollSmoothingFactor := 0.65
+    scrollIndicatorEnabled := 0
 
     if (!FileExist(configFile))
         return
 
     IniRead, swap, %configFile%, Settings, Swap, %swap%
-    IniRead, horiz, %configFile%, Settings, Horizontal, %horiz%
+    IniRead, scrollMode, %configFile%, Settings, ScrollMode, %scrollMode%
     IniRead, k, %configFile%, Settings, SpeedMultiplier, %k%
     IniRead, wheelSensitivity, %configFile%, Settings, WheelSensitivity, %wheelSensitivity%
     IniRead, wheelMaxStep, %configFile%, Settings, WheelMaxStep, %wheelMaxStep%
     IniRead, activationButton, %configFile%, Settings, ActivationButton, %activationButton%
     IniRead, activationButton2, %configFile%, Settings, ActivationButtonSlot2, %activationButton2%
-    IniRead, processListText, %configFile%, Settings, ExcludedProcesses, %processListText%
-    IniRead, topGuardListText, %configFile%, Settings, TopGuardZones, %topGuardListText%
+    processListText := IniReadMultiline(configFile, "Settings", "ExcludedProcesses", processListText)
+    topGuardListText := IniReadMultiline(configFile, "Settings", "TopGuardZones", topGuardListText)
     IniRead, scanInterval, %configFile%, Settings, ScanInterval, %scanInterval%
     IniRead, debugHotkeysEnabled, %configFile%, Settings, EnableDebugHotkeys, %debugHotkeysEnabled%
     if (ErrorLevel)
@@ -318,46 +670,90 @@ LoadSettings()
     IniRead, debugStartEnabled, %configFile%, Settings, DebugStartEnabled, %debugStartEnabled%
     IniRead, mouseLockEnabled, %configFile%, Settings, MouseLockEnabled, %mouseLockEnabled%
     IniRead, mouseLockHideCursor, %configFile%, Settings, MouseLockHideCursor, %mouseLockHideCursor%
+    IniRead, multiVerticalBias, %configFile%, Settings, MultiVerticalBias, %multiVerticalBias%
+    IniRead, multiHorizontalBias, %configFile%, Settings, MultiHorizontalBias, %multiHorizontalBias%
+    IniRead, multiActivationThreshold, %configFile%, Settings, MultiActivationThreshold, %multiActivationThreshold%
+    IniRead, scrollSmoothingEnabled, %configFile%, Settings, ScrollSmoothingEnabled, %scrollSmoothingEnabled%
+    IniRead, scrollSmoothingFactor, %configFile%, Settings, ScrollSmoothingFactor, %scrollSmoothingFactor%
+    IniRead, scrollIndicatorEnabled, %configFile%, Settings, ScrollIndicatorEnabled, %scrollIndicatorEnabled%
+
+    scrollMode := scrollMode + 0
+    if (scrollMode != SCROLL_MODE_VERTICAL && scrollMode != SCROLL_MODE_HORIZONTAL && scrollMode != SCROLL_MODE_MULTI)
+    {
+        legacyHoriz := 0
+        IniRead, legacyHoriz, %configFile%, Settings, Horizontal, 0
+        legacyHoriz := legacyHoriz + 0
+        scrollMode := (legacyHoriz = 1) ? SCROLL_MODE_HORIZONTAL : SCROLL_MODE_VERTICAL
+    }
+
+    multiVerticalBias := multiVerticalBias + 0.0
+    multiHorizontalBias := multiHorizontalBias + 0.0
+    multiActivationThreshold := multiActivationThreshold + 0.0
+
     debugHotkeysEnabled := debugHotkeysEnabled ? 1 : 0
     debugStartEnabled := debugStartEnabled ? 1 : 0
     mouseLockEnabled := mouseLockEnabled ? 1 : 0
     mouseLockHideCursor := mouseLockHideCursor ? 1 : 0
+    scrollIndicatorEnabled := scrollIndicatorEnabled ? 1 : 0
     if (!debugStartEnabled && debugHotkeysEnabled)
         debugStartEnabled := 1
+
+    processListText := IniDeserializeMultiline(processListText)
+    topGuardListText := IniDeserializeMultiline(topGuardListText)
 }
 
 SaveSettings()
 {
     global configFile
-    global swap, horiz, k, wheelSensitivity, wheelMaxStep
+    global swap, scrollMode, k, wheelSensitivity, wheelMaxStep
     global activationButton, activationButton2, processListText, scanInterval, topGuardListText
     global debugHotkeysEnabled, debugStartEnabled, mouseLockEnabled, mouseLockHideCursor
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global scrollSmoothingEnabled, scrollSmoothingFactor, scrollIndicatorEnabled
+    global SCROLL_MODE_HORIZONTAL, SCROLL_MODE_VERTICAL, SCROLL_MODE_MULTI
 
     IniWrite, %swap%, %configFile%, Settings, Swap
-    IniWrite, %horiz%, %configFile%, Settings, Horizontal
+    IniWrite, %scrollMode%, %configFile%, Settings, ScrollMode
+    legacyHoriz := (scrollMode = SCROLL_MODE_HORIZONTAL) ? 1 : 0
+    IniWrite, %legacyHoriz%, %configFile%, Settings, Horizontal
     IniWrite, %k%, %configFile%, Settings, SpeedMultiplier
     IniWrite, %wheelSensitivity%, %configFile%, Settings, WheelSensitivity
     IniWrite, %wheelMaxStep%, %configFile%, Settings, WheelMaxStep
     IniWrite, %activationButton%, %configFile%, Settings, ActivationButton
     IniWrite, %activationButton2%, %configFile%, Settings, ActivationButtonSlot2
-    IniWrite, %processListText%, %configFile%, Settings, ExcludedProcesses
-    IniWrite, %topGuardListText%, %configFile%, Settings, TopGuardZones
+    IniWrite, %multiVerticalBias%, %configFile%, Settings, MultiVerticalBias
+    IniWrite, %multiHorizontalBias%, %configFile%, Settings, MultiHorizontalBias
+    IniWrite, %multiActivationThreshold%, %configFile%, Settings, MultiActivationThreshold
+    procSerialized := IniSerializeMultiline(processListText)
+    guardSerialized := IniSerializeMultiline(topGuardListText)
+    IniDelete, %configFile%, Settings, ExcludedProcesses
+    IniDelete, %configFile%, Settings, TopGuardZones
+    IniWrite, %procSerialized%, %configFile%, Settings, ExcludedProcesses
+    IniWrite, %guardSerialized%, %configFile%, Settings, TopGuardZones
     IniWrite, %scanInterval%, %configFile%, Settings, ScanInterval
     IniWrite, %debugHotkeysEnabled%, %configFile%, Settings, EnableDebugHotkeys
     IniWrite, %debugStartEnabled%, %configFile%, Settings, DebugStartEnabled
     IniWrite, %mouseLockEnabled%, %configFile%, Settings, MouseLockEnabled
     IniWrite, %mouseLockHideCursor%, %configFile%, Settings, MouseLockHideCursor
+    IniWrite, %scrollSmoothingEnabled%, %configFile%, Settings, ScrollSmoothingEnabled
+    IniWrite, %scrollSmoothingFactor%, %configFile%, Settings, ScrollSmoothingFactor
+    IniWrite, %scrollIndicatorEnabled%, %configFile%, Settings, ScrollIndicatorEnabled
 }
 
 ApplySettings()
 {
-    global swap, horiz, k, wheelSensitivity, wheelMaxStep
+    global swap, scrollMode, k, wheelSensitivity, wheelMaxStep
     global activationButton, activationButton2, currentHotkey, currentHotkey2, scanInterval
     global debugHotkeysEnabled, debugStartEnabled, mouseLockEnabled, mouseLockHideCursor
     global mouseLockActive
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global scrollSmoothingEnabled, scrollSmoothingFactor
+    global SCROLL_MODE_VERTICAL, SCROLL_MODE_HORIZONTAL, SCROLL_MODE_MULTI
 
     swap := swap ? 1 : 0
-    horiz := horiz ? 1 : 0
+    scrollMode := scrollMode + 0
+    if (scrollMode != SCROLL_MODE_VERTICAL && scrollMode != SCROLL_MODE_HORIZONTAL && scrollMode != SCROLL_MODE_MULTI)
+        scrollMode := SCROLL_MODE_VERTICAL
     k := (k = "" ? 1.0 : k + 0.0)
     if (k = 0)
         k := 1.0
@@ -370,6 +766,24 @@ ApplySettings()
     if (wheelMaxStep < 120)
         wheelMaxStep := 120
 
+    multiVerticalBias := (multiVerticalBias = "" ? 1.0 : multiVerticalBias + 0.0)
+    if (multiVerticalBias <= 0)
+        multiVerticalBias := 0.1
+    if (multiVerticalBias > 10)
+        multiVerticalBias := 10
+
+    multiHorizontalBias := (multiHorizontalBias = "" ? 1.0 : multiHorizontalBias + 0.0)
+    if (multiHorizontalBias <= 0)
+        multiHorizontalBias := 0.1
+    if (multiHorizontalBias > 10)
+        multiHorizontalBias := 10
+
+    multiActivationThreshold := (multiActivationThreshold = "" ? 1.0 : multiActivationThreshold + 0.0)
+    if (multiActivationThreshold < 0)
+        multiActivationThreshold := 0.0
+    if (multiActivationThreshold > 50)
+        multiActivationThreshold := 50
+
     scanInterval := Floor(scanInterval)
     if (scanInterval < 5)
         scanInterval := 5
@@ -381,6 +795,13 @@ ApplySettings()
     debugStartEnabled := debugStartEnabled ? 1 : 0
     mouseLockEnabled := mouseLockEnabled ? 1 : 0
     mouseLockHideCursor := mouseLockHideCursor ? 1 : 0
+    scrollSmoothingEnabled := scrollSmoothingEnabled ? 1 : 0
+    scrollSmoothingFactor := (scrollSmoothingFactor = "" ? 0.65 : scrollSmoothingFactor + 0.0)
+    if (scrollSmoothingFactor < 0)
+        scrollSmoothingFactor := 0.0
+    if (scrollSmoothingFactor > 0.95)
+        scrollSmoothingFactor := 0.95
+    scrollIndicatorEnabled := scrollIndicatorEnabled ? 1 : 0
 
     if (activationButton2 = activationButton)
         activationButton2 := ""
@@ -395,6 +816,9 @@ ApplySettings()
             ShowCursorAfterLock()
     }
 
+    ResetWheelBuffers()
+    if (!scrollIndicatorEnabled)
+        HideScrollIndicator()
     RefreshProcessBlockSet()
     RefreshTopGuardSet()
     RegisterActivationHotkeys()
@@ -658,6 +1082,57 @@ SendActivationUp(data)
     return SendActivationEvent(data, "up")
 }
 
+SuspendActivationTriggerHotkey(suspend := true)
+{
+    global activationHotkeySuspended, activationTriggerData
+
+    desired := suspend ? true : false
+    if (activationHotkeySuspended = desired)
+        return
+
+    if (!IsObject(activationTriggerData))
+    {
+        if (!desired)
+            activationHotkeySuspended := false
+        return
+    }
+
+    target := activationTriggerData.HasKey("registerSpec") ? activationTriggerData.registerSpec : ""
+    if (target = "")
+    {
+        if (!desired)
+            activationHotkeySuspended := false
+        return
+    }
+
+    state := desired ? "Off" : "On"
+    Hotkey, % target, ActivationButtonDown, %state%
+    activationHotkeySuspended := desired
+}
+
+StartActivationHoldRepeat()
+{
+    global activationHoldRepeatTimerActive, activationHoldRepeatDelay
+
+    if (activationHoldRepeatTimerActive)
+        return
+
+    activationHoldRepeatTimerActive := true
+    SetTimer, ActivationHoldRepeatTimer, Off
+    SetTimer, ActivationHoldRepeatTimer, % -activationHoldRepeatDelay
+}
+
+StopActivationHoldRepeat()
+{
+    global activationHoldRepeatTimerActive
+
+    if (!activationHoldRepeatTimerActive)
+        return
+
+    activationHoldRepeatTimerActive := false
+    SetTimer, ActivationHoldRepeatTimer, Off
+}
+
 RegisterActivationHotkeys()
 {
     global activationButton, activationButton2, currentHotkey, currentHotkey2, activationHotkeyData
@@ -702,6 +1177,189 @@ RegisterSingleActivationHotkey(hotkeySpec, slot)
     else if (slot = 2)
         currentHotkey2 := data.registerSpec
 }
+
+ActivationButtonDown:
+    global captureMode, passThrough, activationHotkeyData, activationTriggerData
+    global activationState, activationNativeDown, activationMovementDetected
+    global activationLastMotionTick, running, wheelBuffer, mxLast, myLast
+    global activationTriggerIdentity, debugEnabled
+    global activationTriggerIsHold, activationHotkeySuspended
+    global activationPendingStartTick, activationHoldGraceDeadline, activationHoldDecisionDelay
+    global activationHoldActive
+
+    if (captureMode)
+        return
+
+    if (activationState != "idle")
+        return
+
+    identity := GetHotkeyIdentity(A_ThisHotkey)
+    if (identity = "")
+        return
+
+    if (!activationHotkeyData.HasKey(identity))
+        return
+
+    data := activationHotkeyData[identity]
+    activationTriggerIdentity := identity
+    activationTriggerData := data
+    activationTriggerIsHold := (!data.isMouse && IsHoldCapableKey(data.key)) ? true : false
+    StopActivationHoldRepeat()
+    SuspendActivationTriggerHotkey(false)
+
+    if (ShouldBlockProcess())
+    {
+        passThrough := true
+        running := false
+        activationState := "idle"
+        activationMovementDetected := false
+        activationLastMotionTick := 0
+        activationPendingStartTick := 0
+        activationHoldGraceDeadline := 0
+        activationHoldActive := false
+        ResetWheelBuffers()
+        activationNativeDown := false
+        eventDelivered := false
+        if (data.isMouse)
+        {
+            activationNativeDown := SendActivationDown(data) ? true : false
+            eventDelivered := activationNativeDown
+        }
+        else
+        {
+            if (activationTriggerIsHold)
+            {
+                activationNativeDown := SendActivationDown(data) ? true : false
+                eventDelivered := activationNativeDown
+                if (activationNativeDown)
+                {
+                    activationHoldActive := true
+                    activationHoldGraceDeadline := 0
+                    StartActivationHoldRepeat()
+                }
+            }
+            else
+                eventDelivered := SendActivationTap(data)
+        }
+        if (!eventDelivered)
+            SendActivationTap(data)
+        if (debugEnabled)
+            DebugLog("Activation pass-through: " . identity)
+        if (activationTriggerIsHold)
+            SuspendActivationTriggerHotkey(true)
+        return
+    }
+
+    passThrough := false
+    ResetWheelBuffers()
+    activationMovementDetected := false
+    activationState := "pending"
+    activationLastMotionTick := A_TickCount
+    activationNativeDown := false
+    activationPendingStartTick := A_TickCount
+    activationHoldGraceDeadline := activationTriggerIsHold ? (A_TickCount + activationHoldDecisionDelay) : 0
+    activationHoldActive := false
+
+    if (GetCursorPoint(mx, my))
+    {
+        mxLast := mx
+        myLast := my
+    }
+
+    running := true
+    if (debugEnabled)
+        DebugLog("Activation start: " . identity)
+return
+
+ActivationButtonUp:
+    global passThrough, activationTriggerData, activationNativeDown, activationState
+    global activationMovementDetected, running, activationTriggerIdentity
+    global activationHotkeyData, activationLastMotionTick, wheelBuffer, debugEnabled
+    global activationTriggerIsHold, activationHotkeySuspended
+    global activationPendingStartTick, activationHoldGraceDeadline, activationHoldActive
+
+    identity := GetHotkeyIdentity(A_ThisHotkey)
+    if (identity = "" && activationTriggerIdentity != "")
+        identity := activationTriggerIdentity
+
+    HideScrollIndicator()
+
+    triggerData := ""
+    if (IsObject(activationTriggerData))
+        triggerData := activationTriggerData
+    else if (identity != "" && activationHotkeyData.HasKey(identity))
+        triggerData := activationHotkeyData[identity]
+
+    if (passThrough)
+    {
+        if (IsObject(triggerData) && activationNativeDown)
+            SendActivationUp(triggerData)
+        SuspendActivationTriggerHotkey(false)
+        passThrough := false
+        activationNativeDown := false
+        activationState := "idle"
+        activationMovementDetected := false
+        activationTriggerData := ""
+        activationTriggerIdentity := ""
+        activationLastMotionTick := 0
+        ResetWheelBuffers()
+        activationTriggerIsHold := false
+        activationHoldActive := false
+        activationHoldGraceDeadline := 0
+        activationPendingStartTick := 0
+        StopActivationHoldRepeat()
+        running := false
+        if (debugEnabled)
+            DebugLog("Activation pass-through end: " . identity)
+        return
+    }
+
+    running := false
+
+    if (IsObject(triggerData))
+    {
+        if (activationState = "pending")
+        {
+            if (activationNativeDown)
+            {
+                SendActivationUp(triggerData)
+                activationNativeDown := false
+                if (!activationTriggerIsHold)
+                    SendActivationTap(triggerData)
+            }
+            else if (!activationTriggerIsHold)
+                SendActivationTap(triggerData)
+        }
+        else if (activationNativeDown)
+        {
+            SendActivationUp(triggerData)
+            activationNativeDown := false
+        }
+    }
+    else
+        activationNativeDown := false
+
+    EndMouseLock()
+    ResetExplorerMode()
+
+    passThrough := false
+    activationState := "idle"
+    activationMovementDetected := false
+    SuspendActivationTriggerHotkey(false)
+    activationTriggerData := ""
+    activationTriggerIdentity := ""
+    activationLastMotionTick := 0
+    ResetWheelBuffers()
+    activationNativeDown := false
+    activationTriggerIsHold := false
+    activationHoldActive := false
+    activationHoldGraceDeadline := 0
+    activationPendingStartTick := 0
+    StopActivationHoldRepeat()
+
+    if (debugEnabled)
+        DebugLog("Activation end: " . identity)
+return
 
 RefreshProcessBlockSet()
 {
@@ -792,9 +1450,15 @@ ShouldSuppressForTopGuard(mx, my)
 ;------------------------
 BuildConfigGui()
 {
-    global guiBuilt, swap, horiz, k, wheelSensitivity, wheelMaxStep
+    global guiBuilt, swap, scrollMode, k, wheelSensitivity, wheelMaxStep
     global activationButton, activationButton2, processListText, topGuardListText
     global debugHotkeysEnabled, debugStartEnabled, mouseLockEnabled, mouseLockHideCursor
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global SCROLL_MODE_VERTICAL, SCROLL_MODE_HORIZONTAL, SCROLL_MODE_MULTI
+    global GuiModeVertical, GuiModeHorizontal, GuiModeMulti
+    global GuiMultiVertBias, GuiMultiHorizBias, GuiMultiThreshold
+    global GuiMultiVertLabel, GuiMultiHorizLabel, GuiMultiThresholdLabel
+    global scrollSmoothingEnabled, scrollSmoothingFactor, scrollIndicatorEnabled
 
     if (guiBuilt)
         return
@@ -813,9 +1477,27 @@ BuildConfigGui()
     Gui, Config:Add, Button, x+5 gGuiClearButton2, Clear
 
     Gui, Config:Add, Checkbox, xm vGuiSwap Checked%swap%, Invert scroll direction
-    Gui, Config:Add, Checkbox, vGuiHoriz Checked%horiz%, Horizontal mode (pan)
+
+    modeVertical := (scrollMode = SCROLL_MODE_VERTICAL) ? 1 : 0
+    modeHorizontal := (scrollMode = SCROLL_MODE_HORIZONTAL) ? 1 : 0
+    modeMulti := (scrollMode = SCROLL_MODE_MULTI) ? 1 : 0
+
+    Gui, Config:Add, Text, xm Section, Scroll mode:
+    Gui, Config:Add, Radio, xm+20 vGuiModeVertical gGuiModeChanged Checked%modeVertical% Group, Vertical (up/down)
+    Gui, Config:Add, Radio, xm+20 vGuiModeHorizontal gGuiModeChanged Checked%modeHorizontal%, Horizontal (pan)
+    Gui, Config:Add, Radio, xm+20 vGuiModeMulti gGuiModeChanged Checked%modeMulti%, Multi-direction (dual axis)
+
+    Gui, Config:Add, Text, xm, Multi-mode tuning:
+    Gui, Config:Add, Text, xm+20 vGuiMultiVertLabel, Vertical bias:
+    Gui, Config:Add, Edit, x+10 yp w80 vGuiMultiVertBias, %multiVerticalBias%
+    Gui, Config:Add, Text, xm+20 vGuiMultiHorizLabel, Horizontal bias:
+    Gui, Config:Add, Edit, x+10 yp w80 vGuiMultiHorizBias, %multiHorizontalBias%
+    Gui, Config:Add, Text, xm+20 vGuiMultiThresholdLabel, Activation threshold (pixels):
+    Gui, Config:Add, Edit, x+10 yp w80 vGuiMultiThreshold, %multiActivationThreshold%
+
     Gui, Config:Add, Checkbox, xm vGuiMouseLock Checked%mouseLockEnabled%, Lock mouse cursor while scrolling
     Gui, Config:Add, Checkbox, vGuiMouseLockHide Checked%mouseLockHideCursor%, Hide cursor when active
+    Gui, Config:Add, Checkbox, xm vGuiScrollIndicatorEnabled Checked%scrollIndicatorEnabled%, Show scroll indicator while active
     Gui, Config:Add, Checkbox, xm vGuiDebugHotkeys Checked%debugHotkeysEnabled%, Enable debug hotkeys (Win+Ctrl+D / Win+Ctrl+L)
     Gui, Config:Add, Checkbox, vGuiDebugStart Checked%debugStartEnabled%, Start with debug logging enabled
 
@@ -824,6 +1506,10 @@ BuildConfigGui()
 
     Gui, Config:Add, Text,, Wheel sensitivity (delta per pixel):
     Gui, Config:Add, Edit, vGuiWheelSens w150, %wheelSensitivity%
+
+    Gui, Config:Add, Checkbox, xm vGuiSmoothEnabled Checked%scrollSmoothingEnabled%, Enable scroll smoothing
+    Gui, Config:Add, Text,, Smoothing factor (0 - 0.95):
+    Gui, Config:Add, Edit, vGuiSmoothFactor w150, %scrollSmoothingFactor%
 
     Gui, Config:Add, Text,, Maximum wheel step:
     Gui, Config:Add, Edit, vGuiWheelMax w150, %wheelMaxStep%
@@ -838,12 +1524,41 @@ BuildConfigGui()
     Gui, Config:Add, Button, x+10 w80 gGuiCloseConfig, Close
 
     guiBuilt := true
+    GuiUpdateScrollModeControls()
 }
 
 ShowConfig:
     BuildConfigGui()
     Gui, Config:Show
 return
+
+GuiModeChanged:
+    global GuiModeVertical, GuiModeHorizontal, GuiModeMulti
+    global GuiMultiVertBias, GuiMultiHorizBias, GuiMultiThreshold
+    global GuiMultiVertLabel, GuiMultiHorizLabel, GuiMultiThresholdLabel
+    Gui, Config:Submit, NoHide
+    GuiUpdateScrollModeControls()
+return
+
+GuiUpdateScrollModeControls()
+{
+    GuiControlGet, modeMulti, Config:, GuiModeMulti
+    state := modeMulti ? "Enable" : "Disable"
+    GuiControl, Config:%state%, GuiMultiVertLabel
+    GuiControl, Config:%state%, GuiMultiVertBias
+    GuiControl, Config:%state%, GuiMultiHorizLabel
+    GuiControl, Config:%state%, GuiMultiHorizBias
+    GuiControl, Config:%state%, GuiMultiThresholdLabel
+    GuiControl, Config:%state%, GuiMultiThreshold
+}
+
+GuiRefreshMultiModeFields()
+{
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    GuiControl, Config:, GuiMultiVertBias, %multiVerticalBias%
+    GuiControl, Config:, GuiMultiHorizBias, %multiHorizontalBias%
+    GuiControl, Config:, GuiMultiThreshold, %multiActivationThreshold%
+}
 
 GuiCaptureButton1:
     BeginGuiCapture(1)
@@ -1046,9 +1761,15 @@ ComposeCapturedHotkey(ih)
 GuiApplySettings:
     Gui, Config:Submit, NoHide
 
-    global swap, horiz, k, wheelSensitivity, wheelMaxStep
+    global swap, scrollMode, k, wheelSensitivity, wheelMaxStep
     global activationButton, activationButton2, processListText, topGuardListText
     global debugHotkeysEnabled, debugStartEnabled, mouseLockEnabled, mouseLockHideCursor
+    global multiVerticalBias, multiHorizontalBias, multiActivationThreshold
+    global SCROLL_MODE_VERTICAL, SCROLL_MODE_HORIZONTAL, SCROLL_MODE_MULTI
+    global GuiModeVertical, GuiModeHorizontal, GuiModeMulti
+    global GuiMultiVertBias, GuiMultiHorizBias, GuiMultiThreshold
+    global GuiMultiVertLabel, GuiMultiHorizLabel, GuiMultiThresholdLabel
+    global scrollSmoothingEnabled, scrollSmoothingFactor, scrollIndicatorEnabled
 
     if (captureMode)
     {
@@ -1059,21 +1780,43 @@ GuiApplySettings:
     activationButton := NormalizeActivationHotkey(GuiActivationDisplay1)
     activationButton2 := NormalizeActivationHotkey(GuiActivationDisplay2)
     swap := GuiSwap
-    horiz := GuiHoriz
+    if (GuiModeMulti)
+        scrollMode := SCROLL_MODE_MULTI
+    else if (GuiModeHorizontal)
+        scrollMode := SCROLL_MODE_HORIZONTAL
+    else
+        scrollMode := SCROLL_MODE_VERTICAL
     debugHotkeysEnabled := GuiDebugHotkeys ? 1 : 0
     debugStartEnabled := GuiDebugStart ? 1 : 0
     mouseLockEnabled := GuiMouseLock ? 1 : 0
     mouseLockHideCursor := GuiMouseLockHide ? 1 : 0
+    scrollIndicatorEnabled := GuiScrollIndicatorEnabled ? 1 : 0
     k := GuiK
     wheelSensitivity := GuiWheelSens
     wheelMaxStep := GuiWheelMax
+    scrollSmoothingEnabled := GuiSmoothEnabled ? 1 : 0
+    scrollSmoothingFactor := GuiSmoothFactor
     processListText := GuiProcessList
     topGuardListText := GuiTopGuardList
+    multiVerticalBias := GuiMultiVertBias + 0.0
+    multiHorizontalBias := GuiMultiHorizBias + 0.0
+    multiActivationThreshold := GuiMultiThreshold + 0.0
 
     GuiControl, Config:, GuiActivationDisplay1, %activationButton%
     GuiControl, Config:, GuiActivationDisplay2, %activationButton2%
 
     ApplySettings()
+    modeVert := (scrollMode = SCROLL_MODE_VERTICAL) ? 1 : 0
+    modeHoriz := (scrollMode = SCROLL_MODE_HORIZONTAL) ? 1 : 0
+    modeMulti := (scrollMode = SCROLL_MODE_MULTI) ? 1 : 0
+    GuiControl, Config:, GuiModeVertical, %modeVert%
+    GuiControl, Config:, GuiModeHorizontal, %modeHoriz%
+    GuiControl, Config:, GuiModeMulti, %modeMulti%
+    GuiRefreshMultiModeFields()
+    GuiUpdateScrollModeControls()
+    GuiControl, Config:, GuiSmoothEnabled, %scrollSmoothingEnabled%
+    GuiControl, Config:, GuiSmoothFactor, %scrollSmoothingFactor%
+    GuiControl, Config:, GuiScrollIndicatorEnabled, %scrollIndicatorEnabled%
     ApplyDebugModePreference()
     SaveSettings()
     ShowTempTooltip("Settings applied", 1000)
@@ -1245,6 +1988,297 @@ DebugLogExplorerContext(tag, ctx)
     DebugLog(tag . ": " . summary)
 }
 
+ExplorerDebugLogScrollMetrics(strategy, data := "")
+{
+    global debugEnabled
+    if (!debugEnabled)
+        return
+
+    msg := "Explorer scroll [" . strategy . "]"
+    if (IsObject(data))
+    {
+        first := true
+        for key, value in data
+        {
+            if (first)
+            {
+                msg .= " "
+                first := false
+            }
+            else
+                msg .= " "
+            msg .= key . "=" . value
+        }
+    }
+    else if (data != "")
+        msg .= " " . data
+    DebugLog(msg)
+}
+
+ExplorerUpdateObservedUnits(ByRef ctx, unitsDelta, pointerDelta, source := "", atBoundary := false, requestedUnits := "")
+{
+    if (!IsObject(ctx))
+        return
+    pointer := pointerDelta + 0.0
+    units := unitsDelta + 0.0
+    if (pointer = 0 || units = 0)
+        return
+
+    requested := ""
+    if (requestedUnits != "")
+        requested := requestedUnits + 0.0
+
+    if (atBoundary)
+    {
+        ctx.Delete("observedSampleUnits")
+        ctx.Delete("observedSamplePointer")
+        ctx.Delete("observedSampleCount")
+        ctx.Delete("observedSampleDir")
+        return
+    }
+
+    if (requested != "")
+    {
+        mismatch := Abs(units - requested)
+        if (mismatch > 0)
+        {
+            allowed := Max(Abs(requested) * 0.08, (source = "observed_uia") ? 0.2 : 4.0)
+            if (mismatch > allowed)
+                return
+        }
+    }
+
+    direction := (pointer > 0) ? 1 : -1
+    lastDir := ctx.HasKey("observedSampleDir") ? ctx.observedSampleDir : 0
+    if (lastDir != 0 && direction != lastDir)
+    {
+        ctx.observedSampleUnits := 0.0
+        ctx.observedSamplePointer := 0.0
+        ctx.observedSampleCount := 0
+    }
+    ctx.observedSampleDir := direction
+
+    unitsAbs := Abs(units)
+    pointerAbs := Abs(pointer)
+    ctx.observedSampleUnits := (ctx.HasKey("observedSampleUnits") ? ctx.observedSampleUnits : 0.0) + unitsAbs
+    ctx.observedSamplePointer := (ctx.HasKey("observedSamplePointer") ? ctx.observedSamplePointer : 0.0) + pointerAbs
+    ctx.observedSampleCount := (ctx.HasKey("observedSampleCount") ? ctx.observedSampleCount : 0) + 1
+
+    sampleUnits := ctx.observedSampleUnits
+    samplePointer := ctx.observedSamplePointer
+
+    if (samplePointer < 60 || sampleUnits < 20)
+        return
+
+    observed := sampleUnits / samplePointer
+    if (observed <= 0)
+        observed := 0.0001
+
+    if (source != "")
+    {
+        ctx.observedSource := source
+        ctx.scaleSource := source
+        if (ctx.HasKey("rangeBoostPointer") && !InStr(ctx.scaleSource, "+range"))
+            ctx.scaleSource .= "+range"
+    }
+
+    prior := ctx.HasKey("observedUnitsPerPixel") ? (ctx.observedUnitsPerPixel + 0.0) : 0.0
+    if (prior > 0)
+    {
+        diffRatio := Abs(observed - prior) / prior
+        if (diffRatio <= 0.03)
+        {
+            ctx.observedUnitsTick := A_TickCount
+            ctx.observedPointerPx := samplePointer
+            ctx.observedPersistent := true
+            ctx.unitsPerPixel := prior
+            ExplorerStoreScaleCache(ctx, prior, samplePointer)
+            ctx.observedSampleUnits := 0.0
+            ctx.observedSamplePointer := 0.0
+            ctx.observedSampleCount := 0
+            return
+        }
+    }
+
+    weight := 0.15
+    if (prior > 0)
+        blended := (prior * (1.0 - weight)) + (observed * weight)
+    else
+        blended := observed
+    blended := Max(0.0001, blended)
+
+    ctx.observedUnitsPerPixel := blended
+    ctx.observedUnitsTick := A_TickCount
+    ctx.observedPointerPx := samplePointer
+    ctx.observedPersistent := true
+    ctx.unitsPerPixel := blended
+    if (source != "")
+    {
+        ctx.scaleSource := source
+        if (ctx.HasKey("rangeBoostPointer") && !InStr(ctx.scaleSource, "+range"))
+            ctx.scaleSource .= "+range"
+    }
+    ctx.scaleSignature := Format("{:.6f}|obs|{:.1f}", blended, samplePointer)
+    ExplorerStoreScaleCache(ctx, blended, samplePointer)
+
+    ctx.observedSampleUnits := 0.0
+    ctx.observedSamplePointer := 0.0
+    ctx.observedSampleCount := 0
+}
+
+ExplorerGetScaleCacheKey(ByRef ctx)
+{
+    if (!IsObject(ctx))
+        return ""
+
+    strategy := ctx.HasKey("strategy") ? ctx.strategy : ""
+    folder := ctx.HasKey("folderView") ? (ctx.folderView + 0) : 0
+    if (!folder && ctx.HasKey("scrollTargetHwnd"))
+        folder := ctx.scrollTargetHwnd + 0
+    if (!folder || strategy = "")
+        return ""
+
+    if (strategy = "scrollbar")
+    {
+        total := ctx.HasKey("totalUnits") ? Round(ctx.totalUnits + 0.0) : 0
+        track := ctx.HasKey("trackLength") ? Round(ctx.trackLength + 0.0) : 0
+        page := ctx.HasKey("pageSize") ? Round(ctx.pageSize + 0.0) : 0
+        if (total <= 0 || track <= 0)
+            return ""
+        return Format("scrollbar|0x{:X}|{}|{}|{}", folder, total, track, page)
+    }
+    else if (strategy = "uia")
+    {
+        range := ctx.HasKey("maxPosEff") ? Round(ctx.maxPosEff + 0.0) : 0
+        view := ctx.HasKey("verticalViewSize") ? Round(ctx.verticalViewSize + 0.0) : 0
+        if (range <= 0)
+            return ""
+        return Format("uia|0x{:X}|{}|{}", folder, range, view)
+    }
+
+    return ""
+}
+
+ExplorerApplyCachedScale(ByRef ctx)
+{
+    global explorerScaleCache
+    if (!IsObject(ctx))
+        return false
+
+    if (!IsObject(explorerScaleCache))
+        explorerScaleCache := {}
+
+    key := ExplorerGetScaleCacheKey(ctx)
+    if (key = "" || !explorerScaleCache.HasKey(key))
+        return false
+
+    entry := explorerScaleCache[key]
+    if (!IsObject(entry) || !entry.HasKey("units"))
+        return false
+
+    units := entry.units + 0.0
+    if (units <= 0)
+        return false
+
+    baseSource := (IsObject(entry) && entry.HasKey("source") && entry.source != "") ? entry.source : "observed"
+    ctx.cachedSource := baseSource
+    ctx.observedUnitsPerPixel := units
+    ctx.observedUnitsTick := A_TickCount
+    ctx.observedSource := "cache"
+    ctx.observedPointerPx := (IsObject(entry) && entry.HasKey("pointer")) ? (entry.pointer + 0.0) : ""
+    ctx.observedPersistent := true
+    ctx.scaleSource := "cache"
+    ctx.unitsPerPixel := units
+    ctx.scaleCacheKey := key
+    return true
+}
+
+ExplorerStoreScaleCache(ByRef ctx, units, pointer)
+{
+    global explorerScaleCache
+    if (!IsObject(ctx))
+        return
+
+    key := ExplorerGetScaleCacheKey(ctx)
+    if (key = "")
+        return
+
+    if (!IsObject(explorerScaleCache))
+        explorerScaleCache := {}
+
+    entry := {}
+    entry.units := units + 0.0
+    entry.pointer := pointer + 0.0
+    if (ctx.HasKey("observedSource") && ctx.observedSource = "cache")
+        entry.source := ctx.HasKey("cachedSource") ? ctx.cachedSource : "observed"
+    else
+        entry.source := ctx.HasKey("observedSource") ? ctx.observedSource : ""
+    entry.timestamp := A_TickCount
+    explorerScaleCache[key] := entry
+    ctx.cachedSource := entry.source
+    ctx.scaleCacheKey := key
+    ExplorerPruneScaleCache()
+}
+
+ExplorerComputeRangeBoostUnits(ByRef ctx, currentUnits)
+{
+    if (!IsObject(ctx) || currentUnits <= 0)
+        return currentUnits
+
+    if (!ctx.HasKey("totalUnits"))
+        return currentUnits
+
+    totalUnits := ctx.totalUnits + 0.0
+    if (totalUnits <= 0 || totalUnits > 1500)
+        return currentUnits
+
+    viewPixels := ctx.HasKey("viewPixels") ? (ctx.viewPixels + 0.0) : 0.0
+    if (viewPixels <= 0 && ctx.HasKey("trackLength"))
+        viewPixels := ctx.trackLength + 0.0
+    if (viewPixels <= 0)
+        viewPixels := 900.0
+
+    targetPointer := Clamp(viewPixels * 0.35, 180.0, 360.0)
+    ctx.rangeBoostPointer := targetPointer
+    desiredUnits := totalUnits / targetPointer
+    if (desiredUnits <= 0)
+        return currentUnits
+
+    minIncrease := currentUnits * 1.03
+    if (desiredUnits <= minIncrease)
+        return currentUnits
+
+    return desiredUnits
+}
+
+ExplorerPruneScaleCache(maxEntries := 20)
+{
+    global explorerScaleCache
+    if (!IsObject(explorerScaleCache))
+        return
+
+    count := 0
+    for key in explorerScaleCache
+        count++
+    if (count <= maxEntries)
+        return
+
+    oldestKey := ""
+    oldestTick := 0
+    for key, entry in explorerScaleCache
+    {
+        tick := (IsObject(entry) && entry.HasKey("timestamp")) ? (entry.timestamp + 0) : 0
+        if (oldestKey = "" || tick < oldestTick)
+        {
+            oldestKey := key
+            oldestTick := tick
+        }
+    }
+
+    if (oldestKey != "")
+        explorerScaleCache.Delete(oldestKey)
+}
+
 BuildExplorerContextSummary(ctx)
 {
     if (!IsObject(ctx))
@@ -1258,13 +2292,11 @@ BuildExplorerContextSummary(ctx)
     }
     if (strategy = "uia")
     {
-        mode := ctx.HasKey("modeV") ? ctx.modeV : "?"
         vert := ctx.HasKey("verticalScrollable") ? (ctx.verticalScrollable ? "true" : "false") : "?"
-        percentVal := ctx.HasKey("lastVerticalPercent") ? (ctx.lastVerticalPercent + 0.0) : ""
-        rangeVal := ctx.HasKey("rangePerPixelV") ? (ctx.rangePerPixelV + 0.0) : ""
-        percentStr := (percentVal = "") ? "?" : Format("{:.2f}", percentVal)
-        rangeStr := (rangeVal = "") ? "?" : Format("{:.3f}", rangeVal)
-        return "strategy=uia modeV=" . mode . " vert=" . vert . " percent=" . percentStr . " rangeStep=" . rangeStr
+        target := (ctx.HasKey("scrollTargetHwnd") && ctx.scrollTargetHwnd) ? Format("0x{:X}", ctx.scrollTargetHwnd + 0) : "0"
+    wheelBuf := ctx.HasKey("wheelBuffer") ? Format("{:.2f}", ctx.wheelBuffer + 0.0) : "?"
+        pending := ctx.HasKey("pendingFocus") ? (ctx.pendingFocus ? "true" : "false") : "?"
+        return "strategy=uia vert=" . vert . " target=" . target . " wheelBuf=" . wheelBuf . " focusPending=" . pending
     }
     if (strategy = "scrollbar")
     {
@@ -1651,6 +2683,16 @@ ClampRawDelta(delta)
     return delta
 }
 
+ResetWheelBuffers()
+{
+    global wheelBuffer, wheelBufferHoriz
+    global scrollVelocityY, scrollVelocityX
+    wheelBuffer := 0.0
+    wheelBufferHoriz := 0.0
+    scrollVelocityY := 0.0
+    scrollVelocityX := 0.0
+}
+
 ResetDebugLogState()
 {
     global debugLogDefault, debugLogFile, debugLogRedirected, debugLogWarned
@@ -1679,6 +2721,9 @@ HandleExit:
     global mouseLockBlankCursor, mouseLockOriginalCursors
     EndMouseLock()
     RestoreSystemCursors()
+    HideScrollIndicator()
+    DestroyScrollIndicatorGui()
+    DestroyScrollIndicatorResources()
     if (mouseLockBlankCursor)
     {
         DllCall("DestroyCursor", "ptr", mouseLockBlankCursor)
@@ -1818,6 +2863,9 @@ TryActivateExplorerMode()
             if (folderOk && folderVisible && scrollOk && scrollVisible)
             {
                 scrollText := scrollBar ? (scrollVisible ? "true" : "false") : "(n/a)"
+                UpdateExplorerScrollUnitScale(explorerContext)
+                explorerContext.pendingFocus := true
+                explorerContext.lastFocusTick := 0
                 if (debugEnabled)
                     DebugLog(Format("Explorer context reused for window=0x{:X} viewVisible=true scrollVisible={}", ctxWin + 0, scrollText))
                 return true
@@ -1861,6 +2909,7 @@ TryActivateExplorerMode()
     if (debugEnabled)
         DebugLogExplorerContext("Explorer context created", context)
     explorerContext := context
+    EnsureExplorerContextFocus(explorerContext, true, screenX, screenY)
     return true
 }
 
@@ -1888,7 +2937,9 @@ ProcessActivationDragState(rawDelta, currentX := "", currentY := "")
     global activationState, activationNativeDown, activationTriggerData
     global activationLastMotionTick, activationIdleRestoreMs, activationMovementDetected
     global activationDragThreshold, explorerContext, debugEnabled
-    global wheelBuffer
+    global wheelBuffer, activationTriggerIsHold, activationHotkeySuspended
+    global activationPendingStartTick, activationHoldDecisionDelay, activationHoldGraceDeadline, activationHoldActive
+    global scrollMode
 
     if (activationState = "idle")
         return true
@@ -1905,16 +2956,45 @@ ProcessActivationDragState(rawDelta, currentX := "", currentY := "")
             activationState := "scrolling"
             activationMovementDetected := true
             activationLastMotionTick := currentTick
-            if (triggerIsMouse)
-                BeginMouseLock(currentX, currentY)
-            if (activationNativeDown || !triggerIsMouse)
+            activationPendingStartTick := 0
+            BeginMouseLock(currentX, currentY)
+            if (activationNativeDown)
             {
                 SendActivationUp(activationTriggerData)
                 activationNativeDown := false
+                activationHoldActive := false
+                activationHoldGraceDeadline := 0
+                StopActivationHoldRepeat()
+                SuspendActivationTriggerHotkey(false)
             }
+            else if (!triggerIsMouse && !activationTriggerIsHold && IsObject(triggerData))
+                SendActivationTap(triggerData)
+
         }
         else
+        {
+            if (activationTriggerIsHold && !activationNativeDown)
+            {
+                if (!activationPendingStartTick)
+                    activationPendingStartTick := activationLastMotionTick
+                if (activationHoldGraceDeadline && currentTick >= activationHoldGraceDeadline && IsObject(triggerData))
+                {
+                    if (SendActivationDown(triggerData))
+                    {
+                        activationNativeDown := true
+                        activationLastMotionTick := currentTick
+                        activationPendingStartTick := 0
+                        activationHoldGraceDeadline := 0
+                        activationHoldActive := true
+                        StartActivationHoldRepeat()
+                        SuspendActivationTriggerHotkey(true)
+                    }
+                    else
+                        activationTriggerIsHold := false
+                }
+            }
             return false
+        }
     }
     else if (activationState = "scrolling")
     {
@@ -1922,17 +3002,22 @@ ProcessActivationDragState(rawDelta, currentX := "", currentY := "")
         {
             activationLastMotionTick := currentTick
         }
-        else if (triggerIsMouse && !activationNativeDown && (currentTick - activationLastMotionTick) >= activationIdleRestoreMs)
+        else if (!triggerIsMouse && activationTriggerIsHold && !activationNativeDown && (currentTick - activationLastMotionTick) >= activationIdleRestoreMs)
         {
             if (SendActivationDown(activationTriggerData))
             {
                 activationNativeDown := true
                 activationState := "native_hold"
-                wheelBuffer := 0
+                ResetWheelBuffers()
                 ResetExplorerMode()
                 EndMouseLock()
+                activationHoldActive := true
+                activationHoldGraceDeadline := 0
+                StartActivationHoldRepeat()
+                SuspendActivationTriggerHotkey(true)
                 if (debugEnabled)
                     DebugLog("Activation returned to native hold")
+                HideScrollIndicator()
                 return false
             }
             else
@@ -1947,19 +3032,51 @@ ProcessActivationDragState(rawDelta, currentX := "", currentY := "")
             {
                 SendActivationUp(activationTriggerData)
                 activationNativeDown := false
+                activationHoldActive := false
+                activationHoldGraceDeadline := 0
+                StopActivationHoldRepeat()
             }
             activationState := "scrolling"
             activationMovementDetected := true
             activationLastMotionTick := currentTick
-            if (triggerIsMouse)
-                BeginMouseLock(currentX, currentY)
+            activationPendingStartTick := 0
+            BeginMouseLock(currentX, currentY)
+            SuspendActivationTriggerHotkey(false)
+            StopActivationHoldRepeat()
         }
         else
             return false
     }
 
+    if (activationState = "scrolling")
+    {
+        if (!EnsureScrollIndicatorVisible(scrollMode, currentX, currentY))
+            HideScrollIndicator()
+    }
+    else
+        HideScrollIndicator()
+
     return (activationState = "scrolling")
 }
+
+ActivationHoldRepeatTimer:
+    global activationHoldRepeatTimerActive, activationHoldRepeatInterval
+    global activationNativeDown, activationTriggerIsHold, activationTriggerData
+    global activationHoldActive
+
+    if (!activationHoldRepeatTimerActive)
+        return
+
+    if (!activationNativeDown || !activationTriggerIsHold || !activationHoldActive || !IsObject(activationTriggerData))
+    {
+        activationHoldRepeatTimerActive := false
+        SetTimer, ActivationHoldRepeatTimer, Off
+        return
+    }
+
+    SendActivationDown(activationTriggerData)
+    SetTimer, ActivationHoldRepeatTimer, % activationHoldRepeatInterval
+return
 
 ;------------------------
 ;  Mouse lock helpers
@@ -2184,9 +3301,313 @@ RestoreSystemCursors()
     return true
 }
 
-HandleExplorerScroll(dy, mx, my)
+;------------------------
+;  Scroll indicator helpers
+;------------------------
+EnsureScrollIndicatorGui()
+{
+    global scrollIndicatorGuiCreated, scrollIndicatorGuiVisible
+    global scrollIndicatorGuiHwnd
+    global debugEnabled
+
+    if (scrollIndicatorGuiCreated)
+        return true
+
+    Gui, ScrollIndicator:New, +LastFound +AlwaysOnTop -Caption +ToolWindow +E0x80000 +OwnDialogs -DPIScale
+    Gui, ScrollIndicator:Margin, 0, 0
+    Gui, ScrollIndicator:+HwndscrollIndicatorGuiHwnd
+    Gui, ScrollIndicator:Color, 000000
+    Gui, ScrollIndicator:Show, Hide w1 h1
+    if (scrollIndicatorGuiHwnd)
+    {
+        exGet := (A_PtrSize = 8) ? "GetWindowLongPtr" : "GetWindowLong"
+        exSet := (A_PtrSize = 8) ? "SetWindowLongPtr" : "SetWindowLong"
+        exStyle := DllCall(exGet, "ptr", scrollIndicatorGuiHwnd, "int", -20, "ptr")
+        exStyle |= 0x00080000  ; WS_EX_LAYERED
+        exStyle |= 0x00000020  ; WS_EX_TRANSPARENT
+        exStyle |= 0x08000000  ; WS_EX_NOACTIVATE
+        DllCall(exSet, "ptr", scrollIndicatorGuiHwnd, "int", -20, "ptr", exStyle)
+    }
+    flags := 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0200
+    if (!DllCall("SetWindowPos", "ptr", scrollIndicatorGuiHwnd, "ptr", -1, "int", 0, "int", 0, "int", 0, "int", 0, "uint", flags))
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator: SetWindowPos(HWND_TOPMOST) failed (" . A_LastError . ")")
+    }
+
+    scrollIndicatorGuiCreated := true
+    scrollIndicatorGuiVisible := false
+    if (debugEnabled)
+        DebugLog(Format("Scroll indicator GUI created (hwnd=0x{:X})", scrollIndicatorGuiHwnd + 0))
+    return true
+}
+
+EnsureScrollIndicatorVisible(mode, x := "", y := "")
+{
+    global scrollIndicatorEnabled, scrollIndicatorCurrentIcon, scrollIndicatorCurrentMode
+    global scrollIndicatorCursorWidth, scrollIndicatorCursorHeight
+    global scrollIndicatorHotspotX, scrollIndicatorHotspotY
+    global scrollIndicatorGuiVisible
+    global debugEnabled
+
+    if (!scrollIndicatorEnabled)
+        return false
+
+    if (!EnsureScrollIndicatorGui())
+        return false
+
+    data := ScrollIndicatorEnsureIcon(mode)
+    if (!IsObject(data))
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator: cursor data unavailable for mode " . mode)
+        return false
+    }
+
+    hIcon := data.HasKey("icon") ? data.icon : 0
+    if (!hIcon)
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator: icon handle missing for mode " . mode)
+        return false
+    }
+
+    if (!ScrollIndicatorUpdateLayered(data))
+        return false
+
+    if (!UpdateScrollIndicatorPosition(x, y, true))
+        return false
+
+    scrollIndicatorCurrentMode := mode
+    return true
+}
+
+UpdateScrollIndicatorPosition(x := "", y := "", forceShow := false)
+{
+    global scrollIndicatorGuiCreated, scrollIndicatorGuiVisible, scrollIndicatorGuiHwnd
+    global scrollIndicatorHotspotX, scrollIndicatorHotspotY
+    global scrollIndicatorLastX, scrollIndicatorLastY
+    global debugEnabled
+
+    if (!scrollIndicatorGuiCreated)
+        return false
+
+    if (x = "" || y = "")
+    {
+        if (!GetCursorPoint(px, py))
+            return false
+        x := px
+        y := py
+    }
+
+    xPos := Round(x - scrollIndicatorHotspotX)
+    yPos := Round(y - scrollIndicatorHotspotY)
+
+    if (scrollIndicatorGuiVisible)
+    {
+        if (scrollIndicatorLastX != xPos || scrollIndicatorLastY != yPos)
+        {
+            moveFlags := 0x0001 | 0x0004 | 0x0010 | 0x0200
+            if (!DllCall("SetWindowPos", "ptr", scrollIndicatorGuiHwnd, "ptr", 0, "int", xPos, "int", yPos, "int", 0, "int", 0, "uint", moveFlags))
+            {
+                if (debugEnabled)
+                    DebugLog("Scroll indicator: SetWindowPos(move) failed (" . A_LastError . ")")
+            }
+            scrollIndicatorLastX := xPos
+            scrollIndicatorLastY := yPos
+            if (debugEnabled)
+                DebugLog(Format("Scroll indicator moved to {}, {}", xPos, yPos))
+        }
+    }
+    else if (forceShow)
+    {
+        Gui, ScrollIndicator:Show, NA x%xPos% y%yPos%
+        scrollIndicatorGuiVisible := true
+        scrollIndicatorLastX := xPos
+        scrollIndicatorLastY := yPos
+        if (debugEnabled)
+        {
+            visible := DllCall("IsWindowVisible", "ptr", scrollIndicatorGuiHwnd)
+            DebugLog(Format("Scroll indicator shown at {}, {} (visible={} hwnd=0x{:X})", xPos, yPos, visible ? "true" : "false", scrollIndicatorGuiHwnd + 0))
+        }
+    }
+    else
+        return false
+
+    return true
+}
+
+HideScrollIndicator()
+{
+    global scrollIndicatorGuiCreated, scrollIndicatorGuiVisible
+    global scrollIndicatorCurrentMode, scrollIndicatorCurrentIcon
+    global scrollIndicatorLastX, scrollIndicatorLastY
+
+    if (scrollIndicatorGuiCreated && scrollIndicatorGuiVisible)
+        Gui, ScrollIndicator:Hide
+
+    stateChanged := scrollIndicatorGuiVisible ? true : false
+    scrollIndicatorGuiVisible := false
+    scrollIndicatorCurrentMode := ""
+    scrollIndicatorCurrentIcon := 0
+    scrollIndicatorLastX := ""
+    scrollIndicatorLastY := ""
+    return stateChanged
+}
+
+ScrollIndicatorEnsureIcon(mode)
+{
+    global scrollIndicatorIconCache, scrollIndicatorCursorWidth, scrollIndicatorCursorHeight
+    global scrollIndicatorHotspotX, scrollIndicatorHotspotY, debugEnabled
+
+    key := ScrollIndicatorModeKey(mode)
+    if (key = "")
+        return ""
+
+    existing := scrollIndicatorIconCache.HasKey(key) ? scrollIndicatorIconCache[key] : ""
+    if (IsObject(existing))
+        return existing
+    if (existing = false)
+        return ""
+
+    path := ScrollIndicatorGetCursorPath(key)
+    if (path = "")
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator cursor missing for mode: " . key)
+        scrollIndicatorIconCache[key] := false
+        return ""
+    }
+
+    flags := 0x0010
+    hCursor := DllCall("LoadImage", "ptr", 0, "str", path, "uint", 2, "int", 0, "int", 0, "uint", flags, "ptr")
+    if (!hCursor)
+    {
+        if (debugEnabled && existing != false)
+            DebugLog("LoadImage failed for scroll indicator cursor: " . path)
+        scrollIndicatorIconCache[key] := false
+        return ""
+    }
+
+    hIcon := DllCall("CopyImage", "ptr", hCursor, "uint", 1, "int", 0, "int", 0, "uint", 0, "ptr")
+    if (!hIcon)
+    {
+        if (debugEnabled && existing != false)
+            DebugLog("CopyImage failed for scroll indicator cursor: " . path)
+        DllCall("DestroyCursor", "ptr", hCursor)
+        scrollIndicatorIconCache[key] := false
+        return ""
+    }
+
+    width := scrollIndicatorCursorWidth
+    height := scrollIndicatorCursorHeight
+    hotspotX := scrollIndicatorHotspotX
+    hotspotY := scrollIndicatorHotspotY
+    hbm := ScrollIndicatorExtractIconBitmap(hCursor, width, height, hotspotX, hotspotY)
+    if (!hbm)
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator: failed to extract bitmap for " . path)
+        DllCall("DestroyCursor", "ptr", hCursor)
+        DllCall("DestroyIcon", "ptr", hIcon)
+        scrollIndicatorIconCache[key] := false
+        return ""
+    }
+
+    data := {icon: hIcon, cursor: hCursor, width: width, height: height, hotspotX: hotspotX, hotspotY: hotspotY, path: path, hbm: hbm}
+    scrollIndicatorIconCache[key] := data
+    return data
+}
+
+ScrollIndicatorModeKey(mode)
+{
+    global SCROLL_MODE_VERTICAL, SCROLL_MODE_HORIZONTAL, SCROLL_MODE_MULTI
+
+    if (mode = SCROLL_MODE_VERTICAL)
+        return "vertical"
+    if (mode = SCROLL_MODE_HORIZONTAL)
+        return "horizontal"
+    if (mode = SCROLL_MODE_MULTI)
+        return "multi"
+    return ""
+}
+
+ScrollIndicatorGetCursorPath(key)
+{
+    fileName := ""
+    if (key = "vertical")
+        fileName := "ScrollV.cur"
+    else if (key = "horizontal")
+        fileName := "ScrollH.cur"
+    else if (key = "multi")
+        fileName := "ScrollM.cur"
+
+    if (fileName = "")
+        return ""
+
+    path := A_ScriptDir . "\" . fileName
+    if (!FileExist(path))
+        return ""
+    return path
+}
+
+DestroyScrollIndicatorGui()
+{
+    global scrollIndicatorGuiCreated, scrollIndicatorGuiVisible, scrollIndicatorGuiHwnd
+    global scrollIndicatorLastX, scrollIndicatorLastY
+    global debugEnabled
+
+    if (!scrollIndicatorGuiCreated)
+        return
+
+    try
+    {
+        Gui, ScrollIndicator:Destroy
+    }
+    catch
+    {
+        if (debugEnabled)
+            DebugLog("Scroll indicator: failed to destroy GUI")
+    }
+
+    scrollIndicatorGuiCreated := false
+    scrollIndicatorGuiVisible := false
+    scrollIndicatorGuiHwnd := 0
+    scrollIndicatorLastX := ""
+    scrollIndicatorLastY := ""
+}
+
+DestroyScrollIndicatorResources()
+{
+    global scrollIndicatorIconCache, scrollIndicatorCurrentMode, scrollIndicatorCurrentIcon
+    global scrollIndicatorCursorWidth, scrollIndicatorCursorHeight
+    global scrollIndicatorHotspotX, scrollIndicatorHotspotY
+
+    for key, data in scrollIndicatorIconCache
+    {
+        if (!IsObject(data))
+            continue
+        if (data.HasKey("hbm") && data.hbm)
+            DllCall("DeleteObject", "ptr", data.hbm)
+        if (data.HasKey("icon") && data.icon)
+            DllCall("DestroyIcon", "ptr", data.icon)
+        if (data.HasKey("cursor") && data.cursor)
+            DllCall("DestroyCursor", "ptr", data.cursor)
+    }
+
+    scrollIndicatorIconCache := {}
+    scrollIndicatorCurrentMode := ""
+    scrollIndicatorCurrentIcon := 0
+    scrollIndicatorCursorWidth := 32
+    scrollIndicatorCursorHeight := 32
+    scrollIndicatorHotspotX := 16
+    scrollIndicatorHotspotY := 16
+}
+
+HandleExplorerScroll(dy, mx := "", my := "")
 {
     global explorerContext, scrollsTotal, swap, debugEnabled
+
     maxAttempts := 2
     attempt := 0
     while (attempt < maxAttempts)
@@ -2209,237 +3630,22 @@ HandleExplorerScroll(dy, mx, my)
 
         ctx := explorerContext
 
+        if (ctx.HasKey("pendingFocus") || ctx.HasKey("wheelBuffer"))
+            EnsureExplorerContextFocus(ctx, ctx.HasKey("pendingFocus") ? ctx.pendingFocus : false, mx, my)
+
         if (debugEnabled)
             DebugLog(Format("HandleExplorerScroll attempt={} strategy={} window=0x{:X}", attempt, ctx.HasKey("strategy") ? ctx.strategy : "?", ctx.HasKey("window") ? (ctx.window + 0) : 0))
 
-        if (ctx.strategy = "listview" && ctx.listView)
-        {
-            if (!DllCall("IsWindow", "ptr", ctx.listView))
-            {
-                if (debugEnabled)
-                    DebugLog("Explorer listview window invalidated; rebuilding context")
-                explorerContext := {}
-                continue
-            }
-            if (!DllCall("IsWindowVisible", "ptr", ctx.listView))
-            {
-                if (debugEnabled)
-                    DebugLog("Explorer listview hidden; rebuilding context")
-                explorerContext := {}
-                continue
-            }
-            direction := swap ? -1 : 1
-            ctx.pixelAccumulator += dy * direction * ctx.pixelScale
-            delta := Round(ctx.pixelAccumulator)
-            if (delta != 0)
-            {
-                ctx.pixelAccumulator -= delta
-                if (ctx.pixelMaxStep && Abs(delta) > ctx.pixelMaxStep)
-                    delta := (delta > 0) ? ctx.pixelMaxStep : -ctx.pixelMaxStep
-                DllCall("SendMessage", "ptr", ctx.listView, "uint", 0x1014, "ptr", 0, "int", delta)
-                scrollsTotal += Abs(delta)
-                if (debugEnabled)
-                    DebugLog(Format("ListView scroll delta={} accum={:.2f}", delta, ctx.pixelAccumulator))
-            }
-            explorerContext := ctx
-            return true
-        }
-
-        if (ctx.strategy = "scrollbar" && ctx.scrollBar)
-        {
-            if (!DllCall("IsWindow", "ptr", ctx.scrollBar))
-            {
-                if (debugEnabled)
-                    DebugLog("ScrollBar handle invalidated; rebuilding context")
-                explorerContext := {}
-                continue
-            }
-            if (!DllCall("IsWindowVisible", "ptr", ctx.scrollBar))
-            {
-                if (debugEnabled)
-                    DebugLog("ScrollBar hidden; rebuilding context")
-                explorerContext := {}
-                continue
-            }
-            if (ctx.HasKey("folderView") && ctx.folderView && DllCall("IsWindow", "ptr", ctx.folderView) && !DllCall("IsWindowVisible", "ptr", ctx.folderView))
-            {
-                if (debugEnabled)
-                    DebugLog("Explorer folder view hidden; rebuilding context")
-                explorerContext := {}
-                continue
-            }
-
-            direction := swap ? -1 : 1
-            ctx.pixelAccumulator += dy * direction
-
-            if (ctx.unitsPerPixel <= 0)
-                ctx.unitsPerPixel := 1.0
-
-            unitDelta := ctx.pixelAccumulator * ctx.unitsPerPixel
-            deltaUnits := Round(unitDelta)
-            if (deltaUnits != 0)
-            {
-                ctx.pixelAccumulator -= deltaUnits / ctx.unitsPerPixel
-                newPos := Clamp(ctx.position + deltaUnits, ctx.minPos, ctx.maxPosEff)
-                if (newPos != ctx.position)
-                {
-                    ApplyScrollBarPosition(ctx, newPos)
-                    SendScrollBarThumb(ctx, newPos, 5)
-                    ctx.position := newPos
-                    ctx.scrollMoved := true
-                    scrollsTotal += Abs(deltaUnits)
-                    if (debugEnabled)
-                        DebugLog(Format("ScrollBar track pos={} delta={} accum={:.2f}", newPos, deltaUnits, ctx.pixelAccumulator))
-                }
-            }
-
-            explorerContext := ctx
-            return true
-        }
-
-        if (ctx.strategy != "uia")
+        scrollResult := HandleExplorerWheelScroll(ctx, dy, mx, my)
+        if (scrollResult < 0)
         {
             if (debugEnabled)
-                DebugLog("Explorer context strategy unknown; rebuilding")
+                DebugLog("Explorer wheel handler reported failure; rebuilding context")
             explorerContext := {}
             continue
         }
 
-        if (ctx.verticalScrollable)
-        {
-            if (ctx.modeV = "range" && !IsObject(ctx.rangePatternV))
-            {
-                if (IsObject(ctx.verticalBar))
-                {
-                    refresh := GetRangeValueData(ctx.verticalBar, ctx.verticalRangeLength)
-                    if (IsObject(refresh))
-                    {
-                        ctx.rangePatternV := refresh.pattern
-                        ctx.rangeElementV := refresh.element
-                        ctx.rangeMinV := refresh.min
-                        ctx.rangeMaxV := refresh.max
-                        ctx.rangeValueV := refresh.value
-                        if (refresh.perPixel != "")
-                            ctx.rangePerPixelV := refresh.perPixel
-                        if (refresh.threshold > 0)
-                            ctx.rangeTriggerV := Max(Abs(ctx.rangePerPixelV) * 0.5, refresh.threshold)
-                        if (refresh.minStep > 0)
-                            ctx.rangeMinStepV := refresh.minStep
-                        if (debugEnabled)
-                            DebugLog("Explorer range pattern refreshed from vertical bar")
-                    }
-                    else
-                    {
-                        if (debugEnabled)
-                            DebugLog("Explorer range pattern unavailable; switching to percent mode")
-                        ctx.modeV := "percent"
-                    }
-                }
-                else
-                {
-                    if (debugEnabled)
-                        DebugLog("Explorer vertical bar missing; switching to percent mode")
-                    ctx.modeV := "percent"
-                }
-            }
-
-            if (ctx.modeV = "range" && IsObject(ctx.rangePatternV))
-            {
-                ctx.rangeAccumulatorV += dy * ctx.rangePerPixelV
-                if (Abs(ctx.rangeAccumulatorV) >= ctx.rangeTriggerV)
-                {
-                    oldValue := ctx.rangeValueV
-                    newValue := Clamp(oldValue + ctx.rangeAccumulatorV, ctx.rangeMinV, ctx.rangeMaxV)
-                    if (Abs(newValue - oldValue) >= ctx.rangeMinStepV)
-                    {
-                        setOk := false
-                        attemptRange := 0
-                        while (!setOk && attemptRange < 2)
-                        {
-                            attemptRange++
-                            try
-                            {
-                                ctx.rangePatternV.SetValue(newValue)
-                                try
-                                    ctx.rangeValueV := ctx.rangePatternV.CurrentValue + 0.0
-                                catch
-                                    ctx.rangeValueV := newValue
-                                ctx.rangeAccumulatorV := 0.0
-                                scrollsTotal += 1
-                                setOk := true
-                                if (debugEnabled)
-                                    DebugLog(Format("Explorer range scroll applied value={}", ctx.rangeValueV))
-                            }
-                            catch
-                            {
-                                if (attemptRange >= 2)
-                                    break
-                                ctx.rangePatternV := ""
-                                if (!IsObject(ctx.verticalBar))
-                                    break
-                                refresh := GetRangeValueData(ctx.verticalBar, ctx.verticalRangeLength)
-                                if (!IsObject(refresh))
-                                    break
-                                ctx.rangePatternV := refresh.pattern
-                                ctx.rangeElementV := refresh.element
-                                ctx.rangeMinV := refresh.min
-                                ctx.rangeMaxV := refresh.max
-                                ctx.rangeValueV := refresh.value
-                                if (refresh.perPixel != "")
-                                    ctx.rangePerPixelV := refresh.perPixel
-                                if (refresh.threshold > 0)
-                                    ctx.rangeTriggerV := Max(Abs(ctx.rangePerPixelV) * 0.5, refresh.threshold)
-                                if (refresh.minStep > 0)
-                                    ctx.rangeMinStepV := refresh.minStep
-                                if (debugEnabled)
-                                    DebugLog("Explorer range pattern refresh during retry")
-                            }
-                        }
-                        if (!setOk)
-                        {
-                            if (debugEnabled)
-                                DebugLog("Explorer range scroll failed after retries; falling back to percent mode")
-                            ctx.modeV := "percent"
-                            ctx.rangePatternV := ""
-                        }
-                    }
-                }
-            }
-
-            if (!(ctx.modeV = "range" && IsObject(ctx.rangePatternV)))
-            {
-                ctx.percentAccumulatorV += dy * ctx.percentPerPixelV
-                if (Abs(ctx.percentAccumulatorV) >= ctx.percentTriggerV)
-                {
-                    oldPercent := ctx.lastVerticalPercent
-                    newPercent := Clamp(oldPercent + ctx.percentAccumulatorV, ctx.minVerticalPercent, ctx.maxVerticalPercent)
-                    if (Abs(newPercent - oldPercent) >= ctx.percentMinStep)
-                    {
-                        horizParam := ctx.horizontalScrollable ? ctx.lastHorizontalPercent : -1
-                        try
-                        {
-                            ctx.pattern.SetScrollPercent(horizParam, newPercent)
-                            try
-                                ctx.lastVerticalPercent := ctx.pattern.CurrentVerticalScrollPercent
-                            catch
-                                ctx.lastVerticalPercent := newPercent
-                            ctx.percentAccumulatorV := 0.0
-                            scrollsTotal += 1
-                            if (debugEnabled)
-                                DebugLog(Format("Explorer percent scroll applied percent={:.2f}", ctx.lastVerticalPercent))
-                        }
-                        catch
-                        {
-                            if (debugEnabled)
-                                DebugLog("Explorer percent scroll failed; rebuilding context")
-                            explorerContext := {}
-                            continue
-                        }
-                    }
-                }
-            }
-        }
-
+        scrollsTotal += scrollResult
         explorerContext := ctx
         return true
     }
@@ -2447,6 +3653,449 @@ HandleExplorerScroll(dy, mx, my)
     if (debugEnabled)
         DebugLog("Explorer scroll handling exhausted attempts without success")
     return false
+}
+
+HandleExplorerWheelScroll(ctx, dy, mx := "", my := "")
+{
+    global swap, debugEnabled, wheelSensitivity, wheelMaxStep
+
+    if (!IsObject(ctx))
+        return -1
+
+    strategy := ctx.HasKey("strategy") ? ctx.strategy : ""
+    if (strategy = "listview")
+        return HandleExplorerListViewScroll(ctx, dy)
+    if (strategy = "scrollbar")
+        return HandleExplorerScrollbarScroll(ctx, dy)
+    if (strategy != "uia")
+        return -1
+
+    target := GetExplorerScrollTargetHwnd(ctx, mx, my)
+    if (target)
+        ctx.scrollTargetHwnd := target
+    if (TryPromoteExplorerUiaContext(ctx))
+        return HandleExplorerScrollbarScroll(ctx, dy)
+    return HandleExplorerUiaWheelFallback(ctx, dy)
+}
+
+HandleExplorerListViewScroll(ByRef ctx, dy)
+{
+    global swap, debugEnabled
+
+    if (!ctx.HasKey("listView") || !ctx.listView)
+        return -1
+    if (!DllCall("IsWindow", "ptr", ctx.listView))
+        return -1
+    if (!DllCall("IsWindowVisible", "ptr", ctx.listView))
+        return -1
+
+    direction := swap ? -1 : 1
+    ctx.pixelAccumulator += dy * direction * ctx.pixelScale
+    delta := Round(ctx.pixelAccumulator)
+    if (delta = 0)
+        return 0
+
+    ctx.pixelAccumulator -= delta
+    if (ctx.pixelMaxStep && Abs(delta) > ctx.pixelMaxStep)
+        delta := (delta > 0) ? ctx.pixelMaxStep : -ctx.pixelMaxStep
+
+    DllCall("SendMessage", "ptr", ctx.listView, "uint", 0x1014, "ptr", 0, "int", delta)
+    if (debugEnabled)
+    {
+        DebugLog(Format("ListView scroll delta={} accum={:.2f}", delta, ctx.pixelAccumulator))
+        metrics := {}
+        metrics.dy := Format("{:.2f}", dy)
+        metrics.pointerPx := Format("{:.2f}", dy * direction)
+        metrics.pixelScale := Format("{:.3f}", ctx.pixelScale)
+        metrics.applied := delta
+        metrics.accumulator := Format("{:.3f}", ctx.pixelAccumulator)
+        ExplorerDebugLogScrollMetrics("listview", metrics)
+    }
+    return Abs(delta)
+}
+
+HandleExplorerScrollbarScroll(ByRef ctx, dy)
+{
+    global swap, debugEnabled
+
+    if (!ctx.HasKey("scrollBar") || !ctx.scrollBar)
+        return -1
+    if (!DllCall("IsWindow", "ptr", ctx.scrollBar))
+        return -1
+    if (!DllCall("IsWindowVisible", "ptr", ctx.scrollBar))
+        return -1
+    if (ctx.HasKey("folderView") && ctx.folderView && DllCall("IsWindow", "ptr", ctx.folderView) && !DllCall("IsWindowVisible", "ptr", ctx.folderView))
+        return -1
+
+    priorPos := ctx.position
+    UpdateExplorerScrollUnitScale(ctx)
+
+    direction := swap ? -1 : 1
+    ctx.pixelAccumulator += dy * direction
+
+    if (ctx.unitsPerPixel <= 0)
+        ctx.unitsPerPixel := 1.0
+
+    unitDelta := ctx.pixelAccumulator * ctx.unitsPerPixel
+    deltaUnits := Round(unitDelta)
+    if (deltaUnits = 0)
+        return 0
+
+    priorAccumulator := ctx.pixelAccumulator
+    ctx.pixelAccumulator -= deltaUnits / ctx.unitsPerPixel
+    newPos := Clamp(ctx.position + deltaUnits, ctx.minPos, ctx.maxPosEff)
+    if (newPos != ctx.position)
+    {
+        ApplyScrollBarPosition(ctx, newPos)
+        SendScrollBarThumb(ctx, newPos, 5)
+        ctx.position := newPos
+        ctx.scrollMoved := true
+        pointerDelta := dy * direction
+        unitsApplied := newPos - priorPos
+        if (pointerDelta != 0 && unitsApplied != 0)
+        {
+            atEdge := (newPos <= ctx.minPos || newPos >= ctx.maxPosEff)
+            ExplorerUpdateObservedUnits(ctx, unitsApplied, pointerDelta, "observed_scrollbar", atEdge, deltaUnits)
+        }
+        if (debugEnabled)
+        {
+            DebugLog(Format("ScrollBar track pos={} delta={} accum={:.2f}", newPos, deltaUnits, ctx.pixelAccumulator))
+            metrics := {}
+            metrics.dy := Format("{:.2f}", dy)
+            metrics.pointerPx := Format("{:.2f}", dy * direction)
+            metrics.requestedUnits := deltaUnits
+            metrics.appliedUnits := unitsApplied
+            metrics.unitsPerPixel := Format("{:.5f}", ctx.unitsPerPixel)
+            metrics.accumulatorBefore := Format("{:.3f}", priorAccumulator)
+            metrics.accumulatorAfter := Format("{:.3f}", ctx.pixelAccumulator)
+            metrics.min := ctx.minPos
+            metrics.maxEff := ctx.maxPosEff
+            ExplorerDebugLogScrollMetrics("scrollbar", metrics)
+        }
+    }
+
+    return Abs(deltaUnits)
+}
+
+HandleExplorerUiaWheelFallback(ByRef ctx, dy)
+{
+    global swap, debugEnabled
+
+    if (!ctx.HasKey("pattern") || !IsObject(ctx.pattern))
+        return -1
+
+    if (!ctx.HasKey("pixelAccumulator"))
+        ctx.pixelAccumulator := 0.0
+
+    UpdateExplorerScrollUnitScale(ctx)
+
+    unitsPerPixel := ctx.HasKey("unitsPerPixel") ? (ctx.unitsPerPixel + 0.0) : 0.0
+    if (unitsPerPixel <= 0)
+        return -1
+
+    direction := swap ? -1 : 1
+    ctx.pixelAccumulator += dy * direction
+
+    deltaUnits := ctx.pixelAccumulator * unitsPerPixel
+    if (Abs(deltaUnits) < 0.01)
+        return 0
+
+    currentPercent := ExplorerGetVerticalScrollPercent(ctx)
+    if (currentPercent = "")
+    {
+        ctx.pixelAccumulator := 0.0
+        return -1
+    }
+
+    maxPercent := ctx.HasKey("maxPosEff") && ctx.maxPosEff > 0 ? (ctx.maxPosEff + 0.0) : 100.0
+    targetPercent := Clamp(currentPercent + deltaUnits, 0.0, maxPercent)
+    appliedUnits := targetPercent - currentPercent
+
+    if (Abs(appliedUnits) < 0.01)
+    {
+        ctx.pixelAccumulator := 0.0
+        return 0
+    }
+
+    priorAccumulator := ctx.pixelAccumulator
+    ctx.pixelAccumulator -= appliedUnits / unitsPerPixel
+
+    try
+    {
+        ctx.pattern.SetScrollPercent(-1, targetPercent)
+        ctx.scrollPercent := targetPercent
+        if (debugEnabled)
+        {
+            DebugLog(Format("UIA precise scroll current={:.3f} target={:.3f} applied={:.3f} pending={:.3f} unitsPerPixel={:.5f}", currentPercent, targetPercent, appliedUnits, ctx.pixelAccumulator * unitsPerPixel, unitsPerPixel))
+            actualPercent := ExplorerGetVerticalScrollPercent(ctx)
+            if (actualPercent = "")
+                actualPercent := targetPercent
+            pointerDelta := dy * direction
+            percentApplied := actualPercent - currentPercent
+            if (pointerDelta != 0 && percentApplied != 0)
+            {
+                atEdge := (targetPercent <= 0.0 || targetPercent >= maxPercent)
+                ExplorerUpdateObservedUnits(ctx, percentApplied, pointerDelta, "observed_uia", atEdge, appliedUnits)
+            }
+            metrics := {}
+            metrics.dy := Format("{:.2f}", dy)
+            metrics.pointerPx := Format("{:.2f}", dy * direction)
+            metrics.requestedPercent := Format("{:.4f}", appliedUnits)
+            metrics.actualPercent := Format("{:.4f}", percentApplied)
+            metrics.startPercent := Format("{:.4f}", currentPercent)
+            metrics.targetPercent := Format("{:.4f}", targetPercent)
+            metrics.unitsPerPixel := Format("{:.5f}", unitsPerPixel)
+            metrics.accumulatorBefore := Format("{:.3f}", priorAccumulator)
+            metrics.accumulatorAfter := Format("{:.3f}", ctx.pixelAccumulator)
+            metrics.pendingUnits := Format("{:.4f}", ctx.pixelAccumulator * unitsPerPixel)
+            ExplorerDebugLogScrollMetrics("uia", metrics)
+        }
+        return Abs(appliedUnits)
+    }
+    catch e
+    {
+        ctx.pixelAccumulator += appliedUnits / unitsPerPixel
+        if (debugEnabled)
+        {
+            errMsg := IsObject(e) && e.HasKey("Message") ? e.Message : e
+            DebugLog("UIA SetScrollPercent failed: " . errMsg)
+        }
+        return -1
+    }
+}
+
+ExplorerGetVerticalScrollPercent(ByRef ctx)
+{
+    if (!IsObject(ctx) || !ctx.HasKey("pattern") || !IsObject(ctx.pattern))
+        return ""
+    try
+    {
+        percent := ctx.pattern.CurrentVerticalScrollPercent
+        if (percent = -1)
+            percent := 0.0
+        ctx.scrollPercent := percent + 0.0
+        return percent + 0.0
+    }
+    catch
+        return ""
+}
+
+
+TryPromoteExplorerUiaContext(ByRef ctx)
+{
+    global debugEnabled
+    if (!IsObject(ctx) || !ctx.HasKey("strategy") || ctx.strategy != "uia")
+        return false
+
+    src := ctx
+    winHwnd := src.HasKey("window") ? src.window : 0
+
+    target := src.HasKey("scrollTargetHwnd") ? src.scrollTargetHwnd : 0
+    if (target && DllCall("IsWindow", "ptr", target))
+    {
+        promoted := BuildExplorerScrollInfoContext(target, winHwnd, src)
+        if (IsObject(promoted))
+        {
+            CopyExplorerUiaMetadata(src, promoted)
+            if (!promoted.HasKey("scrollTargetHwnd") || !promoted.scrollTargetHwnd)
+                promoted.scrollTargetHwnd := target
+            UpdateExplorerScrollUnitScale(promoted, true)
+            ctx := promoted
+            if (debugEnabled)
+                DebugLog("UIA context promoted via scroll target")
+            return true
+        }
+    }
+
+    native := 0
+    if (src.HasKey("verticalBar") && IsObject(src.verticalBar))
+    {
+        try
+            native := src.verticalBar.CurrentNativeWindowHandle
+        catch
+            native := 0
+    }
+    if (native && DllCall("IsWindow", "ptr", native))
+    {
+        promoted := BuildExplorerScrollBarContext(native, winHwnd)
+        if (IsObject(promoted))
+        {
+            CopyExplorerUiaMetadata(src, promoted)
+            if (!promoted.HasKey("scrollTargetHwnd") || !promoted.scrollTargetHwnd)
+                promoted.scrollTargetHwnd := target ? target : native
+            UpdateExplorerScrollUnitScale(promoted, true)
+            ctx := promoted
+            if (debugEnabled)
+                DebugLog("UIA context promoted via native scrollbar handle")
+            return true
+        }
+    }
+
+    return false
+}
+
+CopyExplorerUiaMetadata(src, ByRef dest)
+{
+    if (!IsObject(src) || !IsObject(dest))
+        return
+
+    if (src.HasKey("folderView"))
+        dest.folderView := src.folderView
+    if (src.HasKey("scrollTargetHwnd"))
+        dest.scrollTargetHwnd := src.scrollTargetHwnd
+    if (src.HasKey("focusElement"))
+        dest.focusElement := src.focusElement
+    if (src.HasKey("pendingFocus"))
+        dest.pendingFocus := src.pendingFocus
+    if (src.HasKey("lastFocusTick"))
+        dest.lastFocusTick := src.lastFocusTick
+    if (src.HasKey("startMouseX"))
+        dest.startMouseX := src.startMouseX
+    if (src.HasKey("startMouseY"))
+        dest.startMouseY := src.startMouseY
+    if (src.HasKey("wheelBuffer"))
+        dest.wheelBuffer := src.wheelBuffer
+    if (src.HasKey("pixelAccumulator"))
+        dest.pixelAccumulator := src.pixelAccumulator
+    if (src.HasKey("unitsPerPixel"))
+        dest.unitsPerPixel := src.unitsPerPixel
+    if (src.HasKey("scaleSignature"))
+        dest.scaleSignature := src.scaleSignature
+    if (src.HasKey("scaleSource"))
+        dest.scaleSource := src.scaleSource
+    if (src.HasKey("scalePageUnits"))
+        dest.scalePageUnits := src.scalePageUnits
+    if (src.HasKey("scaleTotalUnits"))
+        dest.scaleTotalUnits := src.scaleTotalUnits
+    if (src.HasKey("viewPixels"))
+        dest.viewPixels := src.viewPixels
+    if (src.HasKey("totalUnits"))
+        dest.totalUnits := src.totalUnits
+    if (src.HasKey("pageSize"))
+        dest.pageSize := src.pageSize
+    if (src.HasKey("verticalViewSize"))
+        dest.verticalViewSize := src.verticalViewSize
+    if (src.HasKey("minPos"))
+        dest.minPos := src.minPos
+    if (src.HasKey("maxPos"))
+        dest.maxPos := src.maxPos
+    if (src.HasKey("maxPosEff"))
+        dest.maxPosEff := src.maxPosEff
+    if (src.HasKey("scrollPercent"))
+        dest.scrollPercent := src.scrollPercent
+    if (src.HasKey("uiaSource"))
+        dest.uiaSource := src.uiaSource
+    dest.active := true
+}
+
+EnsureExplorerContextFocus(ByRef ctx, force := false, screenX := "", screenY := "")
+{
+    global debugEnabled
+    if (!IsObject(ctx) || !ctx.HasKey("window"))
+        return
+
+    winHwnd := ctx.window
+    if (!winHwnd || !DllCall("IsWindow", "ptr", winHwnd))
+        return
+
+    now := A_TickCount
+    last := ctx.HasKey("lastFocusTick") ? ctx.lastFocusTick : 0
+    interval := 250
+    if (!force && last && (now - last) < interval)
+        return
+
+    ctx.lastFocusTick := now
+
+    if (!WinActive("ahk_id " . winHwnd))
+    {
+        WinActivate, ahk_id %winHwnd%
+    }
+
+    target := GetExplorerScrollTargetHwnd(ctx, screenX, screenY)
+    if (target && DllCall("IsWindow", "ptr", target))
+        ControlFocus,, ahk_id %target%
+
+    if (ctx.HasKey("focusElement") && IsObject(ctx.focusElement))
+    {
+        try
+            ctx.focusElement.SetFocus()
+        catch
+        {
+            ; ignore focus errors
+        }
+    }
+
+    focusHandle := GetWindowFocusHandle(winHwnd)
+    success := false
+    if (focusHandle)
+    {
+        if (target)
+            success := (focusHandle = target) || IsWindowDescendant(focusHandle, target)
+        else
+            success := true
+    }
+    ctx.pendingFocus := !success
+}
+
+GetExplorerScrollTargetHwnd(ByRef ctx, screenX := "", screenY := "")
+{
+    if (!IsObject(ctx))
+        return 0
+
+    if (ctx.HasKey("scrollTargetHwnd"))
+    {
+        target := ctx.scrollTargetHwnd
+        if (target && DllCall("IsWindow", "ptr", target))
+            return target
+        ctx.scrollTargetHwnd := 0
+    }
+
+    candidates := []
+    if (ctx.HasKey("folderView") && ctx.folderView && DllCall("IsWindow", "ptr", ctx.folderView))
+        candidates.Push(ctx.folderView)
+    listView := GetExplorerListViewHandle(ctx.HasKey("window") ? ctx.window : 0, ctx.HasKey("folderView") ? ctx.folderView : 0, screenX, screenY)
+    if (listView && DllCall("IsWindow", "ptr", listView))
+        candidates.Push(listView)
+    if (ctx.HasKey("window") && ctx.window && DllCall("IsWindow", "ptr", ctx.window))
+        candidates.Push(ctx.window)
+
+    for index, handle in candidates
+    {
+        if (!handle)
+            continue
+        if (DllCall("IsWindow", "ptr", handle))
+        {
+            ctx.scrollTargetHwnd := handle
+            return handle
+        }
+    }
+
+    return 0
+}
+
+SendExplorerWheelMessage(ctx, target, delta, keyMask, xCoord, yCoord)
+{
+    if (!target || !DllCall("IsWindow", "ptr", target))
+        return false
+
+    wheel := delta & 0xFFFF
+    wParam := (keyMask & 0xFFFF) | ((wheel & 0xFFFF) << 16)
+    lParam := ((yCoord & 0xFFFF) << 16) | (xCoord & 0xFFFF)
+
+    sent := false
+    handles := [target]
+    if (ctx.HasKey("window") && ctx.window && ctx.window != target)
+        handles.Push(ctx.window)
+
+    for index, hwnd in handles
+    {
+        if (!hwnd || !DllCall("IsWindow", "ptr", hwnd))
+            continue
+        DllCall("SendMessage", "ptr", hwnd, "uint", 0x020A, "uptr", wParam, "ptr", lParam)
+        sent := true
+    }
+
+    return sent
 }
 
 EnsureUIAutomation()
@@ -2587,6 +4236,7 @@ FindExplorerScrollContext(targetHwnd, screenX, screenY, winHwnd)
         {
             ctx.folderView := viewHwnd
             ctx.window := winHwnd
+            UpdateExplorerScrollUnitScale(ctx, true)
             if (debugEnabled)
                 DebugLogExplorerContext("ScrollBar context built", ctx)
             return ctx
@@ -2607,6 +4257,7 @@ FindExplorerScrollContext(targetHwnd, screenX, screenY, winHwnd)
         ctx.pixelAccumulator := 0.0
         ctx.pixelScale := (wheelSensitivity != "") ? Max(0.1, wheelSensitivity / 12.0) : 1.0
         ctx.pixelMaxStep := (wheelMaxStep != "") ? Max(10, Floor(wheelMaxStep / 2)) : 400
+        ctx.wheelBuffer := 0.0
         if (debugEnabled)
             DebugLog(Format("ListView strategy selected hwnd=0x{:X}", listView + 0))
         return ctx
@@ -2713,12 +4364,10 @@ FindExplorerScrollContext(targetHwnd, screenX, screenY, winHwnd)
         condThumb := uiAutomation.CreatePropertyCondition(UIA_ControlTypePropertyId, UIA_ThumbControlTypeId)
 
     verticalRange := 0.0
-    verticalRangeInfo := ""
     if (vertScrollable && IsObject(verticalBar))
     {
         thumb := verticalBar.FindFirst(TreeScope_Subtree, condThumb)
         verticalRange := GetScrollRange(verticalBar, thumb, true)
-        verticalRangeInfo := GetRangeValueData(verticalBar, verticalRange)
     }
 
     horizontalRange := 0.0
@@ -2744,66 +4393,41 @@ FindExplorerScrollContext(targetHwnd, screenX, screenY, winHwnd)
     ctx.window := winHwnd
     ctx.verticalScrollable := vertScrollable
     ctx.horizontalScrollable := horizScrollable
-    ctx.lastVerticalPercent := (baseVert = "") ? 0.0 : baseVert + 0.0
-    ctx.lastHorizontalPercent := (baseHoriz = "") ? 0.0 : baseHoriz + 0.0
-    ctx.minVerticalPercent := 0.0
-    ctx.minHorizontalPercent := 0.0
-    ctx.maxVerticalPercent := maxVertical
-    ctx.maxHorizontalPercent := maxHorizontal
-    ctx.verticalRange := verticalRange
-    ctx.horizontalRange := horizontalRange
-    ctx.modeV := "percent"
-    ctx.rangePatternV := ""
-    ctx.rangeElementV := ""
-    ctx.rangeMinV := 0.0
-    ctx.rangeMaxV := 0.0
-    ctx.rangeValueV := 0.0
-    ctx.rangePerPixelV := 0.0
-    ctx.rangeTriggerV := 0.1
-    ctx.rangeMinStepV := 0.1
-    ctx.rangeAccumulatorV := 0.0
-    ctx.percentPerPixelV := (verticalRange > 1) ? (maxVertical / verticalRange) : (maxVertical / 300)
-    ctx.percentPerPixelH := (horizontalRange > 1) ? (maxHorizontal / horizontalRange) : (maxHorizontal / 300)
-    if (ctx.percentPerPixelV = "" || ctx.percentPerPixelV = 0)
-        ctx.percentPerPixelV := 0.2
-    if (ctx.percentPerPixelH = "" || ctx.percentPerPixelH = 0)
-        ctx.percentPerPixelH := 0.2
-    ctx.percentTriggerV := Max(Abs(ctx.percentPerPixelV) * 0.5, 0.05)
-    ctx.percentTriggerH := Max(Abs(ctx.percentPerPixelH) * 0.5, 0.05)
-    ctx.percentMinStep := 0.1
-    ctx.percentAccumulatorV := 0.0
-    ctx.percentAccumulatorH := 0.0
     ctx.verticalBar := verticalBar
     ctx.horizontalBar := horizontalBar
     ctx.verticalRangeLength := verticalRange
-
-    if (IsObject(verticalRangeInfo))
-    {
-        ctx.modeV := "range"
-        ctx.rangePatternV := verticalRangeInfo.pattern
-        ctx.rangeElementV := verticalRangeInfo.element
-        ctx.rangeMinV := verticalRangeInfo.min
-        ctx.rangeMaxV := verticalRangeInfo.max
-        ctx.rangeValueV := verticalRangeInfo.value
-        ctx.rangePerPixelV := (verticalRangeInfo.perPixel != "") ? verticalRangeInfo.perPixel : ((ctx.rangeMaxV - ctx.rangeMinV) / Max(verticalRange, 1))
-        if (ctx.rangePerPixelV = "" || ctx.rangePerPixelV = 0)
-            ctx.rangePerPixelV := 0.2
-        ctx.rangeTriggerV := Max(Abs(ctx.rangePerPixelV) * 0.5, verticalRangeInfo.threshold)
-        ctx.rangeMinStepV := (verticalRangeInfo.minStep > 0) ? verticalRangeInfo.minStep : Max(Abs(ctx.rangePerPixelV), 0.1)
-        ctx.rangeAccumulatorV := 0.0
-        if (debugEnabled)
-            DebugLog("UIA range-value mode configured")
-    }
-    else if (debugEnabled)
-    {
-        DebugLog("UIA falling back to percent mode")
-    }
+    ctx.wheelBuffer := 0.0
+    ctx.pixelAccumulator := 0.0
+    ctx.unitsPerPixel := 0.0
+    try
+        nativeHandle := scroller.CurrentNativeWindowHandle
+    catch
+        nativeHandle := 0
+    if (nativeHandle)
+        ctx.scrollTargetHwnd := nativeHandle + 0
+    else if (viewHwnd && DllCall("IsWindow", "ptr", viewHwnd))
+        ctx.scrollTargetHwnd := viewHwnd
+    else
+        ctx.scrollTargetHwnd := winHwnd
+    ctx.focusElement := scroller
+    ctx.pendingFocus := true
+    ctx.lastFocusTick := 0
 
     ctx.startMouseX := screenX
     ctx.startMouseY := screenY
 
+    ctx.pageSize := viewVert + 0.0
+    ctx.verticalViewSize := viewVert + 0.0
+    ctx.totalUnits := maxVertical + 0.0
+    ctx.minPos := 0.0
+    ctx.maxPos := maxVertical + 0.0
+    ctx.maxPosEff := maxVertical + 0.0
+    ctx.scrollPercent := baseVert + 0.0
+
     if (debugEnabled)
         DebugLogExplorerContext("UIA context built", ctx)
+
+    UpdateExplorerScrollUnitScale(ctx, true)
 
     return ctx
 }
@@ -3002,86 +4626,32 @@ FindFirstScrollPattern(element, screenX := "", screenY := "")
     return ""
 }
 
-GetRangeValueData(element, trackLength)
+InjectExplorerWheel(delta)
 {
-    static UIA_RangeValuePatternId := 10003  
-    if (!IsObject(element))
-        return ""
-
-    info := FindFirstPattern(element, UIA_RangeValuePatternId)
-    if (!IsObject(info))
-        return ""
-
-    pattern := info.pattern
-    patternEl := info.element
-
-    try
-    {
-        minVal := pattern.CurrentMinimum + 0.0
-        maxVal := pattern.CurrentMaximum + 0.0
-        curVal := pattern.CurrentValue + 0.0
-        small := pattern.CurrentSmallChange + 0.0
-        large := pattern.CurrentLargeChange + 0.0
-    }
-    catch
-        return ""
-
-    span := maxVal - minVal
-    perPixel := (trackLength > 0 && span != 0) ? (span / trackLength) : ""
-    threshold := 0.05
-    if (small > 0)
-        threshold := Max(threshold, small * 0.25)
-    minStep := (small > 0) ? small : (perPixel != "" && perPixel > 0 ? perPixel : 0.1)
-
-    return {pattern: pattern
-        , element: patternEl
-        , min: minVal
-        , max: maxVal
-        , value: curVal
-        , small: small
-        , large: large
-        , perPixel: perPixel
-        , threshold: threshold
-        , minStep: minStep}
+    static MOUSEEVENTF_WHEEL := 0x0800
+    if (delta = 0)
+        return true
+    DllCall("mouse_event", "UInt", MOUSEEVENTF_WHEEL, "UInt", 0, "UInt", 0, "Int", delta, "Ptr", 0)
+    return true
 }
 
-FindFirstPattern(element, patternId)
+DispatchWheelDelta(delta)
 {
-    global uiAutomation
-    static TreeScope_Subtree := 7
-    if (!IsObject(element))
-        return ""
-
-    try
-        pattern := element.GetCurrentPattern(patternId)
-    catch
-        pattern := ""
-    if (IsObject(pattern))
-        return {pattern: pattern, element: element}
-
-    static trueCondition := ""
-    if (!IsObject(trueCondition))
-        trueCondition := uiAutomation.CreateTrueCondition()
-
-    children := element.FindAll(TreeScope_Subtree, trueCondition)
-    if (!IsObject(children))
-        return ""
-
-    count := children.Length
-    Loop, %count%
+    if (delta = 0)
+        return true
+    remaining := Abs(delta)
+    sign := (delta > 0) ? 1 : -1
+    chunk := 24
+    if (chunk <= 0)
+        chunk := 24
+    while (remaining > 0)
     {
-        candidate := children.GetElement(A_Index - 1)
-        if (!IsObject(candidate))
-            continue
-        try
-            pattern := candidate.GetCurrentPattern(patternId)
-        catch
-            pattern := ""
-        if (IsObject(pattern))
-            return {pattern: pattern, element: candidate}
+        step := (remaining > chunk) ? chunk : remaining
+        if (!InjectExplorerWheel(step * sign))
+            return false
+        remaining -= step
     }
-
-    return ""
+    return true
 }
 
 GetScrollRange(scrollBarEl, thumbEl, isVertical)
@@ -3446,11 +5016,243 @@ BuildExplorerScrollBarContext(scrollBar, winHwnd)
     ctx.trackLength := metrics.track
     ctx.pageSize := info.page
     ctx.lastTrackPos := info.track
+    ctx.wheelBuffer := 0.0
 
     if (debugEnabled)
         DebugLog(Format("ScrollBar context ready hwnd=0x{:X} parent=0x{:X} pos={} range={} track={} unitsPerPixel={:.3f}", scrollBar + 0, ctx.parent + 0, ctx.position, totalUnits, metrics.track, unitsPerPixel))
 
     return ctx
+}
+
+BuildExplorerScrollInfoContext(target, winHwnd, src := "")
+{
+    global debugEnabled
+    if (!DllCall("IsWindow", "ptr", target))
+        return ""
+
+    info := GetScrollInfoData(target, 1)
+    if (!IsObject(info))
+    {
+        if (debugEnabled)
+            DebugLog(Format("GetScrollInfo failed for target=0x{:X}", target + 0))
+        return ""
+    }
+
+    trackLen := 0.0
+    if (IsObject(src) && src.HasKey("verticalRangeLength"))
+        trackLen := src.verticalRangeLength + 0.0
+    if (trackLen <= 0)
+    {
+        metrics := GetScrollBarMetrics(target)
+        trackLen := metrics.track
+    }
+    if (trackLen <= 1)
+        trackLen := 200.0
+
+    totalUnits := info.max - info.min
+    if (info.page > 0 && totalUnits >= info.page)
+        totalUnits := totalUnits - info.page + 1
+    if (totalUnits < 1)
+        totalUnits := (info.max > info.min) ? (info.max - info.min) : 1
+
+    unitsPerPixel := totalUnits / trackLen
+    if (unitsPerPixel <= 0)
+        unitsPerPixel := 1.0
+
+    maxPosEff := info.max
+    if (info.page > 0)
+    {
+        adjust := info.page - 1
+        if (adjust > 0)
+            maxPosEff := info.max - adjust
+    }
+    if (maxPosEff < info.min)
+        maxPosEff := info.min
+
+    ctx := {}
+    ctx.active := true
+    ctx.strategy := "scrollbar"
+    ctx.scrollBar := target
+    ctx.parent := target
+    ctx.window := winHwnd
+    ctx.minPos := info.min
+    ctx.maxPos := info.max
+    ctx.maxPosEff := maxPosEff
+    ctx.position := info.pos
+    ctx.barType := 1
+    ctx.unitsPerPixel := unitsPerPixel
+    ctx.pixelAccumulator := 0.0
+    ctx.scrollMoved := false
+    ctx.totalUnits := totalUnits
+    ctx.trackLength := trackLen
+    ctx.pageSize := info.page
+    ctx.lastTrackPos := info.track
+    ctx.wheelBuffer := 0.0
+
+    if (debugEnabled)
+        DebugLog(Format("ScrollInfo context ready target=0x{:X} pos={} range={} track={:.1f} unitsPerPixel={:.4f}", target + 0, ctx.position, totalUnits, trackLen, unitsPerPixel))
+
+    return ctx
+}
+
+UpdateExplorerScrollUnitScale(ByRef ctx, forceLog := false)
+{
+    global wheelSensitivity, debugEnabled
+
+    if (!IsObject(ctx) || !ctx.HasKey("strategy"))
+        return false
+
+    strategy := ctx.strategy
+    if (strategy != "scrollbar" && strategy != "uia")
+        return false
+
+    if (!ctx.HasKey("scaleCacheChecked"))
+    {
+        ctx.scaleCacheChecked := true
+        ExplorerApplyCachedScale(ctx)
+    }
+
+    viewPixels := ctx.HasKey("viewPixels") ? (ctx.viewPixels + 0.0) : 0.0
+
+    if ((viewPixels <= 0) && ctx.HasKey("folderView") && ctx.folderView)
+    {
+        rect := GetWindowRectData(ctx.folderView)
+        if (IsObject(rect) && rect.height > 0)
+            viewPixels := rect.height
+    }
+
+    if (viewPixels <= 0 && ctx.HasKey("scrollTargetHwnd") && ctx.scrollTargetHwnd)
+    {
+        rectTarget := GetWindowRectData(ctx.scrollTargetHwnd)
+        if (IsObject(rectTarget) && rectTarget.height > 0)
+            viewPixels := rectTarget.height
+    }
+
+    if (viewPixels <= 0 && strategy = "uia")
+    {
+        if (ctx.HasKey("scroller") && IsObject(ctx.scroller))
+        {
+            rectElem := GetElementBoundingRect(ctx.scroller)
+            if (IsObject(rectElem))
+                viewPixels := rectElem[3] - rectElem[1]
+        }
+        if (viewPixels <= 0 && ctx.HasKey("focusElement") && IsObject(ctx.focusElement))
+        {
+            rectFocus := GetElementBoundingRect(ctx.focusElement)
+            if (IsObject(rectFocus))
+                viewPixels := rectFocus[3] - rectFocus[1]
+        }
+    }
+
+    scaleSource := "view"
+    if (viewPixels <= 0 && ctx.HasKey("trackLength") && ctx.trackLength > 0)
+    {
+        viewPixels := ctx.trackLength + 0.0
+        scaleSource := "track"
+    }
+    else if (viewPixels <= 0 && ctx.HasKey("verticalRangeLength") && ctx.verticalRangeLength > 0)
+    {
+        viewPixels := ctx.verticalRangeLength + 0.0
+        scaleSource := "uiaRange"
+    }
+
+    if (viewPixels <= 0)
+        return false
+
+    ctx.viewPixels := viewPixels
+
+    pageUnits := ctx.HasKey("pageSize") ? (ctx.pageSize + 0.0) : 0.0
+    if (pageUnits <= 0 && strategy = "uia" && ctx.HasKey("verticalViewSize"))
+        pageUnits := ctx.verticalViewSize + 0.0
+    if (pageUnits <= 0 && ctx.HasKey("totalUnits"))
+        pageUnits := ctx.totalUnits + 0.0
+    if (pageUnits <= 0 && ctx.HasKey("maxPosEff") && ctx.HasKey("minPos"))
+        pageUnits := (ctx.maxPosEff + 0.0) - (ctx.minPos + 0.0)
+    if (pageUnits <= 0)
+        return false
+
+    totalUnits := ctx.HasKey("totalUnits") ? (ctx.totalUnits + 0.0) : 0.0
+    if (totalUnits <= 0 && ctx.HasKey("maxPosEff"))
+        totalUnits := ctx.maxPosEff + 0.0
+    if (totalUnits > 0 && pageUnits > totalUnits)
+        pageUnits := totalUnits
+
+    sens := wheelSensitivity
+    if (sens = "")
+        sens := 12.0
+    sens := sens + 0.0
+    if (sens <= 0)
+        sens := 12.0
+
+    baseScale := pageUnits / viewPixels
+    if (baseScale <= 0)
+        return false
+
+    baseUnits := baseScale * (sens / 12.0)
+    if (baseUnits <= 0)
+        baseUnits := baseScale
+    baseUnits := Max(0.0001, baseUnits)
+
+    finalUnits := baseUnits
+    finalSource := scaleSource
+    nowTick := A_TickCount
+
+    if (ctx.HasKey("observedUnitsPerPixel"))
+    {
+        obsUnits := ctx.observedUnitsPerPixel + 0.0
+        obsTick := ctx.HasKey("observedUnitsTick") ? (ctx.observedUnitsTick + 0) : 0
+        persistent := ctx.HasKey("observedPersistent") ? ctx.observedPersistent : false
+        if (obsUnits > 0)
+        {
+            if (persistent || !obsTick || (nowTick - obsTick) <= 15000)
+            {
+                finalUnits := Max(0.0001, obsUnits)
+                if (ctx.HasKey("observedSource") && ctx.observedSource != "")
+                    finalSource := ctx.observedSource
+            }
+            else
+            {
+                ctx.Delete("observedUnitsPerPixel")
+                ctx.Delete("observedUnitsTick")
+                ctx.Delete("observedSource")
+                ctx.Delete("observedPersistent")
+            }
+        }
+    }
+
+    rangeBoostApplied := false
+    if (ctx.HasKey("rangeBoostPointer"))
+        ctx.Delete("rangeBoostPointer")
+    boostedUnits := ExplorerComputeRangeBoostUnits(ctx, finalUnits)
+    rangePointerActive := ctx.HasKey("rangeBoostPointer")
+    if (boostedUnits > finalUnits)
+    {
+        finalUnits := boostedUnits
+        rangeBoostApplied := true
+    }
+    else if (rangePointerActive)
+        rangeBoostApplied := true
+
+    ctx.unitsPerPixel := finalUnits
+    if (rangeBoostApplied)
+        finalSource := finalSource . "+range"
+    ctx.scaleSource := finalSource
+    ctx.scalePageUnits := pageUnits
+    ctx.scaleTotalUnits := totalUnits
+    ctx.baseUnitsPerPixel := baseUnits
+
+    displaySource := finalSource
+    if (finalSource = "cache" && ctx.HasKey("cachedSource") && ctx.cachedSource != "")
+        displaySource := "cache[" . ctx.cachedSource . "]"
+
+    signature := Format("{:.6f}|{:.3f}|{:.0f}|{}|{:.6f}", finalUnits, pageUnits, viewPixels, finalSource, baseUnits)
+    changed := (!ctx.HasKey("scaleSignature") || ctx.scaleSignature != signature)
+    ctx.scaleSignature := signature
+
+    if (debugEnabled && (forceLog || changed))
+        DebugLog(Format("Explorer scale recalculated: src={} viewPx={} pageUnits={:.3f} unitsPerPixel={:.6f} baseUnits={:.6f} sens={:.2f}", displaySource, viewPixels, pageUnits, finalUnits, baseUnits, sens))
+
+    return true
 }
 
 GetScrollInfoData(hwnd, barType)
